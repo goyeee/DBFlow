@@ -1,0 +1,7 @@
+singleProject: true
+
+onlyBuiltDependencies:
+  - esbuild
+
+allowBuilds:
+  esbuild: true
