@@ -1,0 +1,83 @@
+# DBFlow 开发期测试环境
+#
+#   mysql-a  : 映射宿主机 3306 —— 测直连
+#   mysql-b  : 仅内网，不映射端口 —— 测 SSH 隧道（经 sshd 跳板访问）
+#   mysql56  : 映射宿主机 3307 —— MySQL 5.6（root/123123）
+#   sshd     : SSH 跳板（账号 dbjump / 密码 dbflow-jump-2026，端口 宿主机2222 → 容器2222）
+#
+# 启动: docker compose -f docker/testenv/docker-compose.yml up -d
+# 关闭: docker compose -f docker/testenv/docker-compose.yml down
+services:
+  mysql-a:
+    image: mysql:8.4
+    container_name: dbflow-mysql-a
+    environment:
+      MYSQL_ROOT_PASSWORD: dbflow-a-2026
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./init-a.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pdbflow-a-2026"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  mysql-b:
+    image: mysql:8.4
+    container_name: dbflow-mysql-b
+    environment:
+      MYSQL_ROOT_PASSWORD: dbflow-b-2026
+    # 故意不映射端口：只能通过跳板机访问
+    volumes:
+      - ./init-b.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-pdbflow-b-2026"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # MySQL 5.6（Docker Hub 公共镜像；Apple Silicon 下经 Rosetta 以 amd64 运行）
+  # 宿主机 3306 已被 mysql-a 占用，映射到 3307
+  mysql56:
+    image: vijayan/mysql5.6:latest
+    platform: linux/amd64
+    container_name: dbflow-mysql56
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: 123123
+      TZ: Asia/Shanghai
+    command:
+      # 5.6 镜像默认 latin1，显式指定 utf8mb4，否则中文注释/数据会乱码
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+    ports:
+      - "3307:3306"
+    volumes:
+      - dbflow-mysql56-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p123123"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  sshd:
+    image: lscr.io/linuxserver/openssh-server:latest
+    container_name: dbflow-sshd
+    environment:
+      - PASSWORD_ACCESS=true
+      - USER_NAME=dbjump
+      - USER_PASSWORD=dbflow-jump-2026
+      - TZ=Asia/Shanghai
+    ports:
+      - "2222:2222"
+    volumes:
+      # 镜像默认 AllowTcpForwarding no，隧道功能需要打开
+      # 注意不能 :ro —— 镜像启动时会 sed/chown 这个文件
+      - ./sshd_config:/config/sshd/sshd_config
+    depends_on:
+      mysql-b:
+        condition: service_healthy
+
+volumes:
+  dbflow-mysql56-data:

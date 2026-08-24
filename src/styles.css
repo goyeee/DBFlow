@@ -1,0 +1,739 @@
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+/* 整体壳 */
+.app-shell {
+  height: 100vh;
+  overflow: hidden;
+}
+
+.app-body {
+  height: calc(100vh - 40px);
+}
+
+/* 顶部菜单栏 */
+.menubar {
+  height: 40px;
+  line-height: 40px;
+  padding: 0 12px;
+  background: #fff;
+  border-bottom: 1px solid rgba(5, 5, 5, 0.08);
+}
+
+.menubar-menu {
+  border-bottom: none;
+  line-height: 38px;
+  background: transparent;
+}
+
+.sider {
+  border-right: 1px solid rgba(5, 5, 5, 0.06);
+  display: flex;
+  flex-direction: column;
+}
+
+.sider-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(5, 5, 5, 0.06);
+}
+
+.app-title {
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 0.5px;
+}
+
+.sider-body {
+  flex: 1;
+  overflow: auto;
+  padding: 6px 4px;
+  /* 树节点双击不出现文本拖蓝 */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.content {
+  overflow: auto;
+}
+
+.content-empty {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 连接颜色小圆点 */
+.color-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.tree-node-title {
+  display: inline-block;
+  min-width: 60%;
+}
+
+.tree-empty {
+  padding: 32px 12px;
+}
+
+.field-extra {
+  font-size: 12px;
+  color: #999;
+}
+
+.mono-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+/* ═══════════════ 结构同步弹窗（Navicat 布局，紧凑风） ═══════════════ */
+
+/* 弹窗贴近视口顶部、整体不超高——否则页面会出现上下微动 */
+/* antd 6 的 className 直接加在 .ant-modal 面板元素上（不是后代）——
+   用单类选择器命中它本身；内部结构是 container（不是旧版 content） */
+.sync-schema-modal {
+  top: 5vh;
+  height: 90vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.sync-schema-modal .ant-modal-container {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sync-schema-modal .ant-modal-header {
+  flex: none;
+  padding: 8px 16px;
+  margin-bottom: 0;
+}
+
+.sync-schema-modal .ant-modal-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 4px 14px 8px;
+}
+
+/* 步骤标题：正常文档流，位于数据库摘要上方（页面顶部、居中、小字） */
+.cmp-step-title {
+  flex: none;
+  text-align: center;
+  font-size: 12px;
+  color: #888;
+  padding: 2px 0 4px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 弹窗 body 内全部内容正常排布，window 占满 body */
+.cmp-window {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* 顶部端点摘要头：源连接/库 → 目标连接/库（尽量压缩） */
+.cmp-summary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 0 5px;
+  border-bottom: 1px solid rgba(5, 5, 5, 0.06);
+  margin-bottom: 6px;
+  flex: none;
+}
+
+.cmp-summary-text {
+  text-align: left;
+  line-height: 1.25;
+}
+
+.cmp-summary-text.right {
+  text-align: right;
+}
+
+.cmp-summary-conn {
+  font-size: 11.5px;
+  color: #555;
+}
+
+.cmp-summary-db {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #111;
+}
+
+.cmp-summary-icon {
+  font-size: 15px;
+}
+
+.cmp-summary-arrow {
+  color: #999;
+  margin: 0 3px;
+  font-size: 11px;
+}
+
+.cmp-step-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 弹窗内标题和整个树表区域禁止双击/三击选中 */
+.cmp-step-title,
+.diff-tree,
+.diff-tree .ant-table-tbody > tr > td,
+.diff-tree .ant-table-thead > tr > th {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* DDL/部署脚本/部署页语句保持可文本选择 */
+.sql-view,
+.cmp-deploy-list .sql-view,
+.cmp-ddl-pane .sql-view,
+.cmp-deploy-sql {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* 弹窗内标题、静态区域禁止选中 */
+.sync-schema-modal .ant-modal-title,
+.cmp-step-title,
+.cmp-summary,
+.cmp-summary-text,
+.cmp-pane-info,
+.cmp-info-row,
+.cmp-diff-toolbar,
+.cmp-footer,
+.cmp-resizer,
+.cmp-progress-mask,
+.cmp-progress-card,
+.cmp-deploy-item > .anticon {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* ── 第一步：选择源/目标（图 9：两列 + 中缝竖线 + 列内信息块） ── */
+.cmp-panes {
+  position: relative;
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 56px;
+  padding: 14px 24px 4px;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* 中缝竖线 */
+.cmp-panes::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 20px;
+  bottom: 12px;
+  width: 1px;
+  background: rgba(5, 5, 5, 0.07);
+}
+
+.cmp-pane {
+  min-width: 0;
+}
+
+.cmp-pane-title {
+  color: #1677ff;
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.cmp-field {
+  margin-bottom: 10px;
+}
+
+.cmp-field-label {
+  font-size: 12.5px;
+  color: #333;
+  margin-bottom: 4px;
+}
+
+.cmp-swap {
+  position: absolute;
+  left: 50%;
+  top: 92px;
+  transform: translateX(-50%);
+  z-index: 1;
+  background: #fff;
+  padding: 4px 2px;
+}
+
+/* 信息块：竖排逐行 标签: 值（紧凑行距） */
+.cmp-pane-info {
+  margin-top: 26px;
+}
+
+.cmp-info-row {
+  display: flex;
+  line-height: 1.8;
+  font-size: 12.5px;
+}
+
+.cmp-info-label {
+  flex: none;
+  width: 88px;
+  color: #666;
+}
+
+.cmp-info-value {
+  color: #222;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 对比进度弹层 */
+.cmp-progress-mask {
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+
+.cmp-progress-card {
+  width: 460px;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  padding: 20px 24px;
+}
+
+.cmp-progress-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 14px;
+}
+
+.cmp-progress-phase {
+  font-size: 12px;
+  color: #666;
+  margin: 8px 0 12px;
+}
+
+/* ── 第二步：对比结果 ── */
+.cmp-diff-toolbar {
+  flex: none;
+  margin-bottom: 6px;
+}
+
+.cmp-tree-wrap {
+  flex: 1;
+  min-height: 100px;
+  overflow: auto;
+  border: 1px solid rgba(5, 5, 5, 0.08);
+  border-radius: 6px;
+}
+
+/* 上下两区域之间的可拖拽分隔条 */
+.cmp-resizer {
+  flex: none;
+  height: 6px;
+  margin: 4px 0;
+  cursor: row-resize;
+  border-radius: 3px;
+  position: relative;
+  transition: background 0.15s;
+}
+
+.cmp-resizer::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 44px;
+  height: 3px;
+  border-radius: 2px;
+  background: #c2cad6;
+}
+
+.cmp-resizer:hover {
+  background: #e6f0ff;
+}
+
+.cmp-resizer:hover::after {
+  background: #4a90d9;
+}
+
+/* 紧凑行距 + 小字号（Navicat 风，行高 ~24px） */
+.diff-tree .ant-table {
+  font-size: 12px;
+}
+
+.diff-tree .ant-table-thead > tr > th {
+  padding: 4px 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #666;
+  background: #fff;
+}
+
+.diff-tree .ant-table-tbody > tr > td {
+  padding: 2px 6px;
+}
+
+.diff-tree .ant-table-tbody > tr:hover > td {
+  background: #f5f5f5;
+}
+
+.diff-tree .ant-table-row {
+  cursor: pointer;
+}
+
+.dt-group-title {
+  font-weight: 600;
+}
+
+/* 只有点击选中的行给背景（Navicat 深蓝底白字）；勾选不染色 */
+.dt-row-active > td,
+.diff-tree .ant-table-tbody > tr.dt-row-active:hover > td {
+  background: #2f6fdb !important;
+}
+
+.dt-row-active,
+.dt-row-active .dt-name,
+.dt-row-active .dt-desc,
+.dt-row-active .dt-danger,
+.dt-row-active .anticon,
+.dt-row-active .dt-group-title {
+  color: #fff !important;
+}
+
+.dt-obj {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.dt-name {
+  font-weight: 500;
+}
+
+.dt-desc {
+  color: #999;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 340px;
+}
+
+.dt-danger {
+  color: #ff4d4f;
+  font-size: 12px;
+}
+
+/* 首列控制区：勾选框 + 折叠箭头（同列，随层级缩进） */
+.dt-ctrl {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.dt-ctrl .ant-checkbox-wrapper {
+  margin-inline-end: 0;
+}
+
+.dt-expand {
+  display: inline-flex;
+  align-items: center;
+  color: #999;
+  font-size: 10px;
+  width: 14px;
+  cursor: pointer;
+}
+
+.dt-expand .anticon {
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), color 0.25s;
+}
+
+/* 展开时箭头旋转 90°（右 → 下）并变蓝，过程更明显 */
+.dt-expand-open .anticon {
+  transform: rotate(90deg);
+  color: #1677ff;
+}
+
+.dt-expand:hover {
+  color: #1677ff;
+}
+
+/* 叶子行无展开箭头：占位保持勾选框对齐 */
+.dt-expand-leaf {
+  visibility: hidden;
+}
+
+/* 子行展开时的淡入动效（表行/明细被展开渲染时播放） */
+@keyframes dt-row-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.diff-tree .ant-table-tbody > tr.dt-row-child > td {
+  animation: dt-row-in 0.5s ease;
+}
+
+/* 底部 DDL 比较 / 部署脚本：高度由拖拽分隔条控制（inline style），
+   flex: none 保持不伸缩；overflow hidden + 内容区兜底滚动，绝不溢出底部 */
+.cmp-bottom-tabs {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.cmp-bottom-tabs > .ant-tabs-nav {
+  flex: none;
+  margin-bottom: 4px;
+}
+
+.cmp-bottom-tabs > .ant-tabs-nav .ant-tabs-tab {
+  padding: 4px 12px;
+  font-size: 12.5px;
+}
+
+/* 内容区（antd 6 实际类名是 body-holder，不是 content-holder）：
+   flex 占满剩余高度；overflow auto 兜底——即使内层高度链被打断也在这里滚动 */
+.cmp-bottom-tabs .ant-tabs-body-holder {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.cmp-bottom-tabs .ant-tabs-body {
+  height: 100%;
+  min-height: 0;
+}
+
+/* tabpane 在 antd 6 的类名是 content（每个 tab 一个），不是 tabpane */
+.cmp-bottom-tabs .ant-tabs-content {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 部署脚本标签页：SQL 面板撑满 tabpane 并内部滚动 */
+.cmp-bottom-tabs .ant-tabs-content > .sql-view {
+  height: 100%;
+}
+
+.cmp-ddl-compare {
+  display: flex;
+  gap: 8px;
+  height: 100%;
+}
+
+.cmp-ddl-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.cmp-ddl-pane-title {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 8px;
+  flex: none;
+  background: #fafafa;
+  border: 1px solid rgba(5, 5, 5, 0.08);
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+}
+
+.cmp-ddl-side-tag {
+  font-size: 11px;
+  font-weight: 400;
+  margin-left: 8px;
+  padding: 0 6px;
+  border-radius: 3px;
+}
+
+.cmp-ddl-side-tag.source {
+  color: #1d39c4;
+  background: #f0f5ff;
+}
+
+.cmp-ddl-side-tag.target {
+  color: #d46b08;
+  background: #fff7e6;
+}
+
+/* SQL 面板（行号 + 语法高亮）。行用普通 block 布局——
+   flex 布局下三击会整片选中，block 下三击只选中一行 */
+.sql-view {
+  flex: 1;
+  overflow: auto;
+  border: 1px solid rgba(5, 5, 5, 0.08);
+  border-radius: 4px;
+  background: #fff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  padding: 4px 12px;
+  /* DDL/部署脚本禁止双击三击误选，但保留可拖拽选择（复制用） */
+}
+
+.sql-view pre.sql-code {
+  margin: 0;
+  white-space: pre;
+  word-break: break-all;
+  line-height: 1.45;
+  /* WebKit 绘制选区时会按盒宽涂「块间隙」——pre 收缩到内容宽，
+     间隙条才不会越过文本涂到整行宽 */
+  width: fit-content;
+}
+
+.sql-view pre.sql-code > div {
+  margin: 0;
+  padding: 0;
+  /* 行盒与文本同宽：三击/拖选时高亮是整齐贴合文本的一行，
+     不会涂满整行宽度、也不会多出错位的一截 */
+  width: fit-content;
+}
+
+/* 避免选中整段 SQL 时把底部空态提示区也选进去 */
+.sql-view-empty {
+  color: #aaa;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: inherit;
+  padding: 40px 12px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.sql-line {
+  display: block;
+  white-space: pre;
+}
+
+.sql-code {
+  padding-right: 12px;
+}
+
+/* 部署页每条 SQL 容器：避免跨行选中到间隙 */
+.cmp-deploy-sql .sql-view {
+  padding: 4px 8px;
+}
+
+.sql-kw {
+  color: #0033b3;
+  font-weight: 600;
+}
+
+.sql-str {
+  color: #a31515;
+}
+
+.sql-num {
+  color: #098658;
+}
+
+.sql-ident {
+  color: #222;
+}
+
+/* ── 第三步：部署 ── */
+.cmp-footer {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(5, 5, 5, 0.06);
+}
+
+.cmp-deploy-list {
+  margin-top: 8px;
+  flex: 1;
+  min-height: 120px;
+  overflow: auto;
+}
+
+.cmp-deploy-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.cmp-deploy-no {
+  display: none;
+}
+
+.cmp-deploy-sql {
+  flex: 1;
+  min-width: 0;
+}
+
+.cmp-deploy-sql .sql-view {
+  max-height: 132px;
+}
+
+/* DDL 面板标题栏与下方 SQL 区连成一体 */
+.cmp-ddl-pane .sql-view {
+  border-radius: 0 0 4px 4px;
+}
+
+.cmp-deploy-error {
+  color: #ff4d4f;
+  font-size: 12.5px;
+  margin-bottom: 2px;
+}
+
+/* 对比视图 SQL 预览 */
+.sql-preview {
+  background: #f6f8fa;
+  border: 1px solid rgba(5, 5, 5, 0.06);
+  border-radius: 4px;
+  padding: 8px 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  max-width: 760px;
+}

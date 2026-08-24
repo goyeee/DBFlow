@@ -1,0 +1,46 @@
+[package]
+name = "dbflow"
+version = "0.1.0"
+description = "DBFlow - 数据库结构与数据同步工具"
+authors = ["goyeee"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "dbflow_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+sqlx = { version = "0.9", default-features = false, features = ["mysql", "runtime-tokio", "tls-rustls"] }
+russh = "0.62"
+keyring = "4"
+blowfish = "0.10"
+aes = "0.9"
+cbc = { version = "0.2", features = ["alloc", "block-padding"] }
+sha1 = "0.11"
+hex = "0.4"
+quick-xml = "0.41"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+
+[profile.dev]
+opt-level = 0
