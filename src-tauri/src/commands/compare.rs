@@ -3,7 +3,7 @@ use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use crate::compare::DiffItem;
-use crate::datasource::{LiveConnection, Registry};
+use crate::datasource::Registry;
 use crate::error::{AppError, AppResult};
 
 /// 双端抓快照 → 差异清单（每项内嵌目标端 SQL，前端勾选后原样提交执行）
