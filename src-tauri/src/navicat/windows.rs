@@ -53,7 +53,7 @@ fn read_values(key: &RegKey) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for name in key.enum_values().flatten().map(|(n, _)| n) {
         // Navicat 大多存 REG_SZ；数字/其他类型也尽量按字符串取
-        if let Ok(v) = key.get_string_value(&name) {
+        if let Ok(v) = key.get_value::<String, _>(&name) {
             map.insert(name, v);
         }
     }
