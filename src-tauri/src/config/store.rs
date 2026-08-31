@@ -133,6 +133,7 @@ mod tests {
                     default_database: Some("db_shop".into()),
                     has_password: true,
                     ssh_has_password: false,
+                    remember_password: false,
                     options: Default::default(),
                     ssh: None,
                     created_at: 1_800_000_000,

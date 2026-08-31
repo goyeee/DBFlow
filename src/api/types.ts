@@ -33,6 +33,8 @@ export interface ConnectionProfile {
   defaultDatabase: string | null
   hasPassword: boolean
   sshHasPassword: boolean
+  /** 记住密码：密码同时落一份到本地 secrets.json（仅混淆），更新/重启后免输入 */
+  rememberPassword: boolean
   options: ConnectionOptions
   ssh: SshTunnelConfig | null
   createdAt: number
@@ -50,6 +52,7 @@ export interface ConnectionProfileInput {
   port: number
   user: string
   defaultDatabase: string | null
+  rememberPassword: boolean
   options: ConnectionOptions
   ssh: SshTunnelConfig | null
 }
@@ -136,8 +139,15 @@ export interface NavicatImportResult {
 
 // ───────────────── 结构对比与同步 ─────────────────
 
-export type DiffKind = 'table' | 'column' | 'index'
-export type DiffAction = 'create' | 'drop' | 'modify'
+export type DiffKind = 'table' | 'column' | 'index' | 'view'
+export type DiffAction = 'create' | 'drop' | 'modify' | 'rename'
+
+export interface CompareOptions {
+  /** 表永远对比；索引默认对比 */
+  compareIndexes: boolean
+  /** 视图等非常用对象默认不对比 */
+  compareViews: boolean
+}
 
 export interface DiffItem {
   /** tbl:{表} / tblopt:{表} / col:{表}:{列} / idx:{表}:{索引} */
@@ -161,4 +171,20 @@ export interface ApplyResultItem {
   sql: string
   ok: boolean
   error: string | null
+}
+
+/** 多目标对比：单个目标规格 */
+export interface CompareTargetSpec {
+  key: string
+  connectionId: string
+  database: string
+}
+
+/** 多目标对比：单个目标结果 */
+export interface TargetReport {
+  key: string
+  connectionId: string
+  database: string
+  items: DiffItem[]
+  error: AppErrorInfo | null
 }

@@ -51,9 +51,19 @@ fn default_literal(data_type: &str, default: &str) -> String {
     }
 }
 
-/// 单列完整 DDL 片段：`name` type [NOT NULL|NULL] [DEFAULT ..] [extra] [COMMENT '..']
+/// 单列完整 DDL 片段：`name` type [CHARACTER SET .. COLLATE ..] [NOT NULL|NULL] [DEFAULT ..] [extra] [COMMENT '..']
 pub fn column_ddl(c: &ColumnDef) -> String {
     let mut s = format!("{} {}", quote_ident(&c.name), c.data_type);
+    if let Some(coll) = &c.collation {
+        let charset = c.character_set.as_deref().unwrap_or_else(|| coll.split('_').next().unwrap_or(coll));
+        s.push_str(&format!(
+            " CHARACTER SET {} COLLATE {}",
+            quote_ident(charset),
+            quote_ident(coll)
+        ));
+    } else if let Some(cs) = &c.character_set {
+        s.push_str(&format!(" CHARACTER SET {}", quote_ident(cs)));
+    }
     s.push_str(if c.nullable { " NULL" } else { " NOT NULL" });
     if let Some(d) = &c.default {
         s.push_str(&format!(" DEFAULT {}", default_literal(&c.data_type, d)));
@@ -68,9 +78,15 @@ pub fn column_ddl(c: &ColumnDef) -> String {
     s
 }
 
-/// UI 差异描述：不带列名的形态（类型/可空/默认值/extra/注释）
+/// UI 差异描述：不带列名的形态（类型/字符集/可空/默认值/extra/注释）
 pub fn describe_column(c: &ColumnDef) -> String {
     let mut s = c.data_type.clone();
+    if let Some(coll) = &c.collation {
+        let charset = c.character_set.as_deref().unwrap_or_else(|| coll.split('_').next().unwrap_or(coll));
+        s.push_str(&format!(" CHARSET={} COLLATE={}", charset, coll));
+    } else if let Some(cs) = &c.character_set {
+        s.push_str(&format!(" CHARSET={}", cs));
+    }
     s.push_str(if c.nullable { " NULL" } else { " NOT NULL" });
     if let Some(d) = &c.default {
         s.push_str(&format!(" DEFAULT {}", default_literal(&c.data_type, d)));
@@ -95,22 +111,48 @@ pub fn describe_index(i: &IndexDef) -> String {
     } else {
         "INDEX"
     };
-    let cols: Vec<String> = i.columns.iter().map(|c| quote_ident(c)).collect();
+    let cols = index_column_specs(i);
     format!("{} ({})", kind, cols.join(","))
 }
 
+fn index_column_specs(i: &IndexDef) -> Vec<String> {
+    i.columns
+        .iter()
+        .enumerate()
+        .map(|(idx, c)| {
+            let mut s = quote_ident(c);
+            if let Some(Some(len)) = i.sub_parts.get(idx) {
+                s.push_str(&format!("({len})"));
+            }
+            if let Some(Some(dir)) = i.directions.get(idx) {
+                s.push(' ');
+                s.push_str(dir);
+            }
+            s
+        })
+        .collect()
+}
+
 pub fn describe_table_options(t: &TableDef) -> String {
-    format!(
-        "ENGINE={} COMMENT={}",
-        t.engine.as_deref().unwrap_or("-"),
-        t.comment.as_deref().unwrap_or(""),
-    )
+    let mut parts = vec![format!(
+        "ENGINE={}",
+        t.engine.as_deref().unwrap_or("-")
+    )];
+    if let Some(coll) = &t.collation {
+        let charset = coll.split('_').next().unwrap_or(coll);
+        parts.push(format!("CHARSET={charset}"));
+        parts.push(format!("COLLATE={coll}"));
+    }
+    parts.push(format!(
+        "COMMENT={}",
+        t.comment.as_deref().unwrap_or("")
+    ));
+    parts.join(" ")
 }
 
 /// 索引 DDL 片段：PRIMARY KEY (`id`) / UNIQUE KEY `uk` (`a`,`b`) / KEY `k` (`a`)
 fn index_ddl(i: &IndexDef) -> String {
-    let cols: Vec<String> = i.columns.iter().map(|c| quote_ident(c)).collect();
-    let cols = cols.join(",");
+    let cols = index_column_specs(i).join(",");
     if i.is_primary {
         format!("PRIMARY KEY ({cols})")
     } else {
@@ -167,11 +209,56 @@ pub fn add_column_sql(db: &str, table: &str, c: &ColumnDef, after: Option<&str>)
     sql
 }
 
-pub fn modify_column_sql(db: &str, table: &str, c: &ColumnDef) -> String {
-    format!(
+pub fn modify_column_sql(
+    db: &str,
+    table: &str,
+    c: &ColumnDef,
+    after: Option<Option<&str>>,
+) -> String {
+    let mut sql = format!(
         "ALTER TABLE {} MODIFY COLUMN {}",
         qualified(db, table),
         column_ddl(c)
+    );
+    match after {
+        None => {}
+        Some(None) => sql.push_str(" FIRST"),
+        Some(Some(prev)) => sql.push_str(&format!(" AFTER {}", quote_ident(prev))),
+    }
+    sql
+}
+
+/// 合并同一表的列变更（ADD / MODIFY）为单条 ALTER TABLE。
+/// adds: (列定义, 前一列名(None 表示 FIRST))，必须按源表列顺序传入。
+/// modifies: (列定义, 位置信息)。位置信息：None = 不带位置子句；Some(None) = FIRST；Some(Some("col")) = AFTER col。
+pub fn alter_columns_sql(
+    db: &str,
+    table: &str,
+    adds: &[(ColumnDef, Option<&str>)],
+    modifies: &[(ColumnDef, Option<Option<&str>>)],
+) -> String {
+    let mut clauses: Vec<String> = Vec::new();
+    for (c, after) in adds {
+        let mut clause = format!("ADD COLUMN {}", column_ddl(c));
+        match after {
+            Some(prev) => clause.push_str(&format!(" AFTER {}", quote_ident(prev))),
+            None => clause.push_str(" FIRST"),
+        }
+        clauses.push(clause);
+    }
+    for (c, after) in modifies {
+        let mut clause = format!("MODIFY COLUMN {}", column_ddl(c));
+        match after {
+            None => {}
+            Some(None) => clause.push_str(" FIRST"),
+            Some(Some(prev)) => clause.push_str(&format!(" AFTER {}", quote_ident(prev))),
+        }
+        clauses.push(clause);
+    }
+    format!(
+        "ALTER TABLE {} {}",
+        qualified(db, table),
+        clauses.join(", ")
     )
 }
 
@@ -184,13 +271,37 @@ pub fn drop_column_sql(db: &str, table: &str, column: &str) -> String {
 }
 
 pub fn add_index_sql(db: &str, table: &str, i: &IndexDef) -> String {
-    let cols: Vec<String> = i.columns.iter().map(|c| quote_ident(c)).collect();
+    let cols = index_column_specs(i).join(",");
     format!(
         "ALTER TABLE {} ADD {} ({})",
         qualified(db, table),
         index_kind_prefix(i),
-        cols.join(",")
+        cols
     )
+}
+
+pub fn create_view_sql(db: &str, v: &crate::datasource::ViewDef) -> String {
+    format!(
+        "CREATE VIEW {} AS {}",
+        qualified(db, &v.name),
+        v.definition
+    )
+}
+
+pub fn alter_view_sql(db: &str, v: &crate::datasource::ViewDef) -> String {
+    format!(
+        "ALTER VIEW {} AS {}",
+        qualified(db, &v.name),
+        v.definition
+    )
+}
+
+pub fn drop_view_sql(db: &str, v: &crate::datasource::ViewDef) -> String {
+    format!("DROP VIEW {}", qualified(db, &v.name))
+}
+
+pub fn describe_view(v: &crate::datasource::ViewDef) -> String {
+    v.definition.trim().to_string()
 }
 
 pub fn drop_index_sql(db: &str, table: &str, i: &IndexDef) -> String {
@@ -206,20 +317,51 @@ pub fn drop_index_sql(db: &str, table: &str, i: &IndexDef) -> String {
 }
 
 /// 同名索引列/唯一性变化：一条 ALTER 同时 DROP + ADD
-pub fn rebuild_index_sql(db: &str, table: &str, i: &IndexDef) -> String {
-    let cols: Vec<String> = i.columns.iter().map(|c| quote_ident(c)).collect();
+/// 当主键重建且目标表存在 AUTO_INCREMENT 列时，会先把 AUTO_INCREMENT 去掉、改完主键再加回来，
+/// 避免 MySQL "there can be only one auto column and it must be defined as a key" 错误。
+pub fn rebuild_index_sql(
+    db: &str,
+    table: &str,
+    i: &IndexDef,
+    auto_inc_col: Option<&ColumnDef>,
+) -> String {
+    let cols = index_column_specs(i).join(",");
     let drop_part = if i.is_primary {
         "DROP PRIMARY KEY".to_string()
     } else {
         format!("DROP INDEX {}", quote_ident(&i.name))
     };
-    format!(
-        "ALTER TABLE {} {} , ADD {} ({})",
-        qualified(db, table),
+
+    let mut clauses: Vec<String> = Vec::new();
+    if let Some(c) = auto_inc_col {
+        let without_ai = ColumnDef {
+            extra: strip_auto_increment(&c.extra),
+            ..c.clone()
+        };
+        clauses.push(format!("MODIFY COLUMN {}", column_ddl(&without_ai)));
+    }
+    clauses.push(format!(
+        "{} , ADD {} ({})",
         drop_part,
         index_kind_prefix(i),
-        cols.join(",")
+        cols
+    ));
+    if let Some(c) = auto_inc_col {
+        clauses.push(format!("MODIFY COLUMN {}", column_ddl(c)));
+    }
+    format!(
+        "ALTER TABLE {} {}",
+        qualified(db, table),
+        clauses.join(", ")
     )
+}
+
+fn strip_auto_increment(extra: &str) -> String {
+    extra
+        .split_whitespace()
+        .filter(|t| *t != "auto_increment")
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -285,8 +427,8 @@ mod tests {
                 c("name", "varchar(64)", false, None),
             ],
             indexes: vec![
-                IndexDef { name: "PRIMARY".into(), columns: vec!["id".into()], unique: true, is_primary: true, index_type: Some("BTREE".into()) },
-                IndexDef { name: "uk_name".into(), columns: vec!["name".into()], unique: true, is_primary: false, index_type: Some("BTREE".into()) },
+                IndexDef { name: "PRIMARY".into(), columns: vec!["id".into()], sub_parts: vec![], directions: vec![], unique: true, is_primary: true, index_type: Some("BTREE".into()) },
+                IndexDef { name: "uk_name".into(), columns: vec!["name".into()], sub_parts: vec![], directions: vec![], unique: true, is_primary: false, index_type: Some("BTREE".into()) },
             ],
         };
         let sql = create_table_sql("db", &t);

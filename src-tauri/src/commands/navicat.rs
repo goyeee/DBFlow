@@ -125,6 +125,7 @@ pub async fn navicat_import(
             default_database: c.database.clone(),
             has_password: c.password.as_deref().map(|p| !p.is_empty()).unwrap_or(false),
             ssh_has_password: c.ssh_password.is_some(),
+            remember_password: false,
             options: Default::default(),
             ssh: c.ssh.clone(),
             created_at: now,
@@ -157,7 +158,9 @@ pub async fn navicat_import(
     Ok(result)
 }
 
-/// 打开配置目录（排查 connections.json 用）
+/// 打开配置目录（排查 connections.json 用）。
+/// 配置目录名带 .app 后缀（= bundle identifier），macOS 的 open 会把它当应用包
+/// "启动"而失败，故改用 reveal 方式在 Finder 中定位文件。
 #[tauri::command]
 pub fn open_config_dir(
     app: tauri::AppHandle,
@@ -165,8 +168,10 @@ pub fn open_config_dir(
 ) -> AppResult<()> {
     use tauri_plugin_opener::OpenerExt;
     let dir = store.config_dir();
+    let file = dir.join("connections.json");
+    let target = if file.exists() { file } else { dir };
     app.opener()
-        .open_path(dir.to_string_lossy().to_string(), None::<&str>)
+        .reveal_item_in_dir(target.to_string_lossy().to_string())
         .map_err(|e| AppError::Internal(format!("打开目录失败: {}", e)))?;
     Ok(())
 }

@@ -18,7 +18,15 @@ pub trait LiveConnection: Send + Sync {
     async fn list_tables(&self, database: &str) -> AppResult<Vec<TableBrief>>;
     async fn describe_table(&self, database: &str, table: &str) -> AppResult<Vec<ColumnBrief>>;
     /// 抓取一个库的结构快照（对比/同步用）
-    async fn snapshot_schema(&self, database: &str) -> AppResult<SchemaSnapshot>;
+    async fn snapshot_schema(&self, database: &str) -> AppResult<SchemaSnapshot> {
+        self.snapshot_tables(database, None).await
+    }
+    /// 抓取一个库的结构快照；only_tables = Some 时只抓这些表
+    async fn snapshot_tables(
+        &self,
+        database: &str,
+        only_tables: Option<&[String]>,
+    ) -> AppResult<SchemaSnapshot>;
     /// 执行一条 DDL/SQL（同步部署用）
     async fn execute(&self, sql: &str) -> AppResult<()>;
     /// 返回服务器版本号（MySQL 为 SELECT VERSION()）
@@ -57,11 +65,12 @@ pub struct ColumnBrief {
 
 // ───────────────────────── 结构快照（对比/同步用） ─────────────────────────
 
-/// 一个库的结构快照：表（含列与索引）定义，按表名排序
+/// 一个库的结构快照：表（含列与索引）与视图定义
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SchemaSnapshot {
     pub database: String,
     pub tables: Vec<TableDef>,
+    pub views: Vec<ViewDef>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -87,6 +96,10 @@ pub struct ColumnDef {
     pub extra: String,
     pub comment: Option<String>,
     pub ordinal: u32,
+    /// 列级字符集（CHARACTER_SET_NAME）
+    pub character_set: Option<String>,
+    /// 列级排序规则（COLLATION_NAME）
+    pub collation: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -94,10 +107,21 @@ pub struct IndexDef {
     pub name: String,
     /// 按 SEQ_IN_INDEX 排序的列名
     pub columns: Vec<String>,
+    /// 与 columns 一一对应：每列的前缀长度（None 表示完整列）
+    pub sub_parts: Vec<Option<u32>>,
+    /// 与 columns 一一对应：None = 默认升序，Some("DESC") = 降序（MySQL 8.0+）
+    pub directions: Vec<Option<String>>,
     pub unique: bool,
     pub is_primary: bool,
     /// BTREE / HASH / FULLTEXT / SPATIAL
     pub index_type: Option<String>,
+}
+
+/// 视图定义（仅对比 SELECT 语句；definer/algorithm 等后续按需扩展）
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ViewDef {
+    pub name: String,
+    pub definition: String,
 }
 
 /// COLUMN_DEFAULT 跨版本归一化：

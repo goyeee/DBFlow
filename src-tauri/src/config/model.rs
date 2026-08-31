@@ -49,9 +49,12 @@ pub struct ConnectionProfile {
     pub port: u16,
     pub user: String,
     pub default_database: Option<String>,
-    /// 密码本体只存系统钥匙串，这里只记录"有没有"
+    /// 密码本体存系统钥匙串；勾选"记住密码"时同时落一份到本地 secrets.json（仅混淆）
     pub has_password: bool,
     pub ssh_has_password: bool,
+    /// 记住密码：读取时优先用本地 secrets.json，绕开 dev 重编译后的钥匙串授权问题
+    #[serde(default)]
+    pub remember_password: bool,
     pub options: ConnectionOptions,
     pub ssh: Option<SshTunnelConfig>,
     /// epoch 秒
@@ -73,6 +76,9 @@ pub struct ConnectionProfileInput {
     pub port: u16,
     pub user: String,
     pub default_database: Option<String>,
+    /// 记住密码（同时写本地 secrets.json，见 secret 模块说明）
+    #[serde(default)]
+    pub remember_password: bool,
     #[serde(default)]
     pub options: ConnectionOptions,
     pub ssh: Option<SshTunnelConfig>,

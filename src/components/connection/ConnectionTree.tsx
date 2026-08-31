@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Dropdown, Empty, Modal, Spin, Tree, message } from 'antd'
 import type { DataNode } from 'antd/es/tree'
 import {
@@ -39,6 +39,7 @@ export function ConnectionTree() {
   const session = useSessionStore()
   const ui = useUiStore()
   const [expandedKeys, setExpandedKeys] = useState<string[]>([])
+  const [selectedKeys, setSelectedKeys] = useState<string[]>([])
   // 双击防抖：双击的第二次点击不再切换展开状态
   const lastClick = useRef<{ key: string; time: number }>({ key: '', time: 0 })
 
@@ -157,6 +158,41 @@ export function ConnectionTree() {
     [ensureNodeLoaded],
   )
 
+  // 标签页右键"导航栏打开"：确保数据就绪 → 展开 分组/连接/库 → 选中表 → 滚动到可见
+  const reveal = useUiStore((s) => s.revealTable)
+  useEffect(() => {
+    if (!reveal) return
+    let cancelled = false
+    const connKey = `c:${reveal.connectionId}`
+    const dbKey = `d:${reveal.connectionId}:${encodeURIComponent(reveal.database)}`
+    const tableKey = `t:${reveal.connectionId}:${encodeURIComponent(reveal.database)}:${encodeURIComponent(reveal.table)}`
+    const groupId = connections.find((c) => c.id === reveal.connectionId)?.groupId
+    const groupKey = `g:${groupId ?? 'none'}`
+    ;(async () => {
+      try {
+        await ensureNodeLoaded(connKey)
+        await ensureNodeLoaded(dbKey)
+      } catch (e) {
+        message.error(errText(e))
+        return
+      }
+      if (cancelled) return
+      setExpandedKeys((prev) => [...new Set([...prev, groupKey, connKey, dbKey])])
+      setSelectedKeys([tableKey])
+      // 等展开后的树渲染完，再滚动到选中节点
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          document
+            .querySelector('.sider-body .ant-tree-treenode-selected')
+            ?.scrollIntoView({ block: 'nearest' })
+        }),
+      )
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [reveal, connections, ensureNodeLoaded])
+
   const treeData = useMemo<DataNode[]>(() => {
     const connNode = (c: ConnectionProfile): DataNode => {
       const connected = !!session.connected[c.id]
@@ -250,6 +286,7 @@ export function ConnectionTree() {
       blockNode
       treeData={wrapContextMenu(treeData, { ensureConnected, setExpandedKeys })}
       expandedKeys={expandedKeys}
+      selectedKeys={selectedKeys}
       onExpand={(keys) => {
         const next = keys as string[]
         // 新展开的节点主动保证数据（rc-tree 的 loadData 只对"未加载"节点触发，
@@ -262,19 +299,30 @@ export function ConnectionTree() {
         setExpandedKeys(next)
       }}
       loadData={(node) => loadData(String(node.key))}
-      onSelect={(_keys, info) => {
+      onSelect={(keys, info) => {
+        setSelectedKeys(keys as string[])
         const key = String(info.node.key)
         const { type, rest } = parseKey(key)
-        if (type === 't') {
-          const [connId, db, table] = rest
-          session.openTable(connId, decodeURIComponent(db), decodeURIComponent(table))
-          return
-        }
-        // 双击的第二次点击（350ms 内同节点）不重复切换
+
+        // 双击的第二次点击（350ms 内同节点）用于正式打开表；非表节点双击不切换展开
         const now = Date.now()
         const last = lastClick.current
+        const isDoubleClick = last.key === key && now - last.time < 350
         lastClick.current = { key, time: now }
-        if (last.key === key && now - last.time < 350) return
+
+        if (type === 't') {
+          const [connId, db, table] = rest
+          const database = decodeURIComponent(db)
+          const tableName = decodeURIComponent(table)
+          if (isDoubleClick) {
+            session.openTable(connId, database, tableName)
+          } else {
+            session.previewTable(connId, database, tableName)
+          }
+          return
+        }
+
+        if (isDoubleClick) return
 
         // 单击连接/库/分组节点 = 展开/收起（不必去点小箭头）
         const expanding = !expandedKeys.includes(key)
@@ -349,6 +397,24 @@ function wrapContextMenu(
               } else if (action === 'disconnect') {
                 await session.disconnect(id)
               }
+            },
+          }}
+        >
+          <span className="tree-node-title">{node.title as React.ReactNode}</span>
+        </Dropdown>
+      )
+    } else if (type === 'd') {
+      // 数据库节点右键"关闭"：收起该节点，并关掉该库下所有已打开的表标签
+      menu = (
+        <Dropdown
+          trigger={['contextMenu']}
+          menu={{
+            items: [{ key: 'close', label: '关闭' }],
+            onClick: ({ key: action }) => {
+              if (action !== 'close') return
+              const [id, db] = rest
+              useSessionStore.getState().closeDatabaseTabs(id, decodeURIComponent(db))
+              ctx.setExpandedKeys((prev) => prev.filter((k) => k !== key))
             },
           }}
         >

@@ -3,9 +3,9 @@ pub mod sqlgen;
 
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use crate::datasource::{ColumnDef, IndexDef, SchemaSnapshot, TableDef};
+use crate::datasource::{ColumnDef, IndexDef, SchemaSnapshot, TableDef, ViewDef};
 use sqlgen::{create_table_sql, describe_column, describe_index, describe_table_options};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -14,6 +14,30 @@ pub enum DiffKind {
     Table,
     Column,
     Index,
+    View,
+}
+
+/// 对比范围选项：表永远对比；索引默认对比；视图等非常用对象默认不对比。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompareOptions {
+    pub compare_indexes: bool,
+    pub compare_views: bool,
+}
+
+impl Default for CompareOptions {
+    fn default() -> Self {
+        Self {
+            compare_indexes: true,
+            compare_views: false,
+        }
+    }
+}
+
+impl CompareOptions {
+    pub fn default_for_command() -> Self {
+        Self::default()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -22,12 +46,13 @@ pub enum DiffAction {
     Create,
     Drop,
     Modify,
+    Rename,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffItem {
-    /// 稳定标识：tbl:{表} / tblopt:{表} / col:{表}:{列} / idx:{表}:{索引}
+    /// 稳定标识：tbl:{表} / tblopt:{表} / col:{表}:{列} / idx:{表}:{索引} / view:{视图}
     pub id: String,
     pub kind: DiffKind,
     pub action: DiffAction,
@@ -48,31 +73,111 @@ pub struct DiffItem {
 }
 
 /// 源快照 vs 目标快照 → 差异项（目标端如何变更才能与源一致）
-pub fn diff_snapshots(source: &SchemaSnapshot, target: &SchemaSnapshot) -> Vec<DiffItem> {
+pub fn diff_snapshots(
+    source: &SchemaSnapshot,
+    target: &SchemaSnapshot,
+    options: &CompareOptions,
+) -> Vec<DiffItem> {
     let src: BTreeMap<&str, &TableDef> = source.tables.iter().map(|t| (t.name.as_str(), t)).collect();
     let tgt: BTreeMap<&str, &TableDef> = target.tables.iter().map(|t| (t.name.as_str(), t)).collect();
 
     let mut items = Vec::new();
 
+    // 先找出结构完全相同且名字看起来是重命名的未匹配表对（避免 DROP + CREATE 丢数据）
+    let src_unmatched: Vec<&TableDef> = src
+        .values()
+        .filter(|t| !tgt.contains_key(t.name.as_str()))
+        .copied()
+        .collect();
+    let mut tgt_unmatched: Vec<&TableDef> = tgt
+        .values()
+        .filter(|t| !src.contains_key(t.name.as_str()))
+        .copied()
+        .collect();
+    let mut renamed_old_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut renamed_new_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for s_tbl in &src_unmatched {
+        if let Some(pos) = tgt_unmatched.iter().position(|t_tbl| {
+            tables_structurally_equal(s_tbl, t_tbl) && names_look_renamed(&s_tbl.name, &t_tbl.name)
+        }) {
+            let t_tbl = tgt_unmatched.remove(pos);
+            renamed_old_names.insert(t_tbl.name.clone());
+            renamed_new_names.insert(s_tbl.name.clone());
+            let src_ddl = create_table_sql(&source.database, s_tbl);
+            let tgt_ddl = create_table_sql(&target.database, t_tbl);
+            items.push(table_rename(&target.database, s_tbl, t_tbl, &src_ddl, &tgt_ddl));
+        }
+    }
+
     // 所有生成的 SQL 都在目标端执行 → 库前缀一律用目标库名；
     // DDL 对比视图用各端真实库名生成完整建表语句
     for (name, s) in &src {
+        if renamed_new_names.contains(*name) {
+            continue;
+        }
         let src_ddl = create_table_sql(&source.database, s);
         match tgt.get(*name) {
             None => items.push(table_create(&target.database, s, &src_ddl)),
             Some(t) => {
                 let tgt_ddl = create_table_sql(&target.database, t);
-                items.extend(diff_table(&target.database, s, t, &src_ddl, &tgt_ddl));
+                items.extend(diff_table(&target.database, s, t, &src_ddl, &tgt_ddl, options));
             }
         }
     }
     for (name, t) in &tgt {
-        if !src.contains_key(*name) {
-            let tgt_ddl = create_table_sql(&target.database, t);
-            items.push(table_drop(&target.database, t, &tgt_ddl));
+        if renamed_old_names.contains(*name) || src.contains_key(*name) {
+            continue;
         }
+        let tgt_ddl = create_table_sql(&target.database, t);
+        items.push(table_drop(&target.database, t, &tgt_ddl));
     }
+
+    if options.compare_views {
+        items.extend(diff_views(&source.views, &target.views, &target.database));
+    }
+
     items
+}
+
+fn tables_structurally_equal(a: &TableDef, b: &TableDef) -> bool {
+    a.engine == b.engine
+        && a.collation == b.collation
+        && a.comment == b.comment
+        && a.columns == b.columns
+        && a.indexes == b.indexes
+}
+
+/// 判断两个表名是否像一次重命名（避免把结构相同的两个无关表误判为 rename）。
+/// 规则：忽略大小写后相同；或公共前缀长度 >=3 且 >= 较短名长度的 40%。
+fn names_look_renamed(a: &str, b: &str) -> bool {
+    let a = a.to_lowercase();
+    let b = b.to_lowercase();
+    if a == b {
+        return true;
+    }
+    let lcp = a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count();
+    let min_len = a.chars().count().min(b.chars().count());
+    lcp >= 3 && lcp >= (min_len as f64 * 0.4) as usize
+}
+
+fn table_rename(db: &str, s: &TableDef, t: &TableDef, src_ddl: &str, tgt_ddl: &str) -> DiffItem {
+    DiffItem {
+        id: format!("rename:{}:{}", t.name, s.name),
+        kind: DiffKind::Table,
+        action: DiffAction::Rename,
+        table: t.name.clone(),
+        name: s.name.clone(),
+        source_desc: Some(describe_table_options(s)),
+        target_desc: Some(describe_table_options(t)),
+        sql: Some(format!(
+            "RENAME TABLE {} TO {}",
+            sqlgen::qualified(db, &t.name),
+            sqlgen::qualified(db, &s.name)
+        )),
+        dangerous: false,
+        source_ddl: Some(src_ddl.to_string()),
+        target_ddl: Some(tgt_ddl.to_string()),
+    }
 }
 
 fn table_create(db: &str, s: &TableDef, src_ddl: &str) -> DiffItem {
@@ -99,7 +204,7 @@ fn table_drop(db: &str, t: &TableDef, tgt_ddl: &str) -> DiffItem {
         table: t.name.clone(),
         name: t.name.clone(),
         source_desc: None,
-        target_desc: Some(format!("{} 张表，待删除", t.columns.len())),
+        target_desc: Some(format!("{} 个列，待删除", t.columns.len())),
         sql: Some(format!("DROP TABLE {}", sqlgen::qualified(db, &t.name))),
         dangerous: true,
         source_ddl: None,
@@ -107,7 +212,14 @@ fn table_drop(db: &str, t: &TableDef, tgt_ddl: &str) -> DiffItem {
     }
 }
 
-fn diff_table(db: &str, s: &TableDef, t: &TableDef, src_ddl: &str, tgt_ddl: &str) -> Vec<DiffItem> {
+fn diff_table(
+    db: &str,
+    s: &TableDef,
+    t: &TableDef,
+    src_ddl: &str,
+    tgt_ddl: &str,
+    options: &CompareOptions,
+) -> Vec<DiffItem> {
     let mut items = Vec::new();
     let mk = |id: String, kind: DiffKind, action: DiffAction, name: String,
               source_desc: Option<String>, target_desc: Option<String>,
@@ -120,12 +232,22 @@ fn diff_table(db: &str, s: &TableDef, t: &TableDef, src_ddl: &str, tgt_ddl: &str
         target_ddl: Some(tgt_ddl.to_string()),
     };
 
-    // 表选项（ENGINE / COMMENT；字符集差异仅描述不生成 SQL——CONVERT 风险高，后续版本做）
-    if s.engine != t.engine || s.comment != t.comment {
+    // 表选项（ENGINE / COMMENT / COLLATION；表级字符集随排序规则推导）
+    if s.engine != t.engine || s.comment != t.comment || s.collation != t.collation {
         let mut alter = format!("ALTER TABLE {}", sqlgen::qualified(db, &s.name));
         if s.engine != t.engine {
             if let Some(e) = &s.engine {
                 alter.push_str(&format!(" ENGINE={e}"));
+            }
+        }
+        if s.collation != t.collation {
+            if let Some(coll) = &s.collation {
+                let charset = coll.split('_').next().unwrap_or(coll);
+                alter.push_str(&format!(
+                    " DEFAULT CHARACTER SET {} COLLATE {}",
+                    sqlgen::quote_ident(charset),
+                    sqlgen::quote_ident(coll)
+                ));
             }
         }
         if s.comment != t.comment {
@@ -146,106 +268,231 @@ fn diff_table(db: &str, s: &TableDef, t: &TableDef, src_ddl: &str, tgt_ddl: &str
         ));
     }
 
-    // 列
+    // 列：按源表列顺序遍历，保证合并 ALTER 时 ADD/MODIFY ... AFTER 的位置正确
     let src_cols: BTreeMap<&str, &ColumnDef> =
         s.columns.iter().map(|c| (c.name.as_str(), c)).collect();
     let tgt_cols: BTreeMap<&str, &ColumnDef> =
         t.columns.iter().map(|c| (c.name.as_str(), c)).collect();
 
-    for (name, sc) in &src_cols {
-        match tgt_cols.get(*name) {
+    let mut adds: Vec<(&ColumnDef, Option<String>)> = Vec::new();
+    let mut type_modifies: Vec<(&ColumnDef, &ColumnDef)> = Vec::new();
+    for (pos, sc) in s.columns.iter().enumerate() {
+        match tgt_cols.get(sc.name.as_str()) {
             None => {
-                // 新增列：定位到源中前一列，用 AFTER 保持位置
-                let pos = s.columns.iter().position(|c| c.name == *name);
-                let after = pos
-                    .and_then(|p| p.checked_sub(1))
-                    .and_then(|p| s.columns.get(p))
-                    .map(|c| c.name.clone());
-                items.push(mk(
-                    format!("col:{}:{}", s.name, name),
-                    DiffKind::Column,
-                    DiffAction::Create,
-                    name.to_string(),
-                    Some(describe_column(sc)),
-                    None,
-                    Some(sqlgen::add_column_sql(db, &s.name, sc, after.as_deref())),
-                    false,
-                ));
+                let after = if pos == 0 {
+                    None
+                } else {
+                    Some(s.columns[pos - 1].name.clone())
+                };
+                adds.push((sc, after));
             }
             Some(tc) if !cols_equal(sc, tc) => {
-                items.push(mk(
-                    format!("col:{}:{}", s.name, name),
-                    DiffKind::Column,
-                    DiffAction::Modify,
-                    name.to_string(),
-                    Some(describe_column(sc)),
-                    Some(describe_column(tc)),
-                    Some(sqlgen::modify_column_sql(db, &s.name, sc)),
-                    false,
-                ));
+                type_modifies.push((sc, tc));
             }
             _ => {}
         }
     }
-    for (name, tc) in &tgt_cols {
-        if !src_cols.contains_key(*name) {
+
+    // 位置变更检测：从第一个顺序不对的位置起，后续所有已存在列都重排。
+    // ordinal 全 0 表示快照未提供可靠位置信息（如类型转换兜底失败），直接跳过位置检测。
+    let ordinals_reliable = t.columns.iter().all(|c| c.ordinal > 0);
+    let mut seen_mismatch = false;
+    let mut position_change_names: Vec<String> = Vec::new();
+    if ordinals_reliable {
+        for (pos, sc) in s.columns.iter().enumerate() {
+            if !tgt_cols.contains_key(sc.name.as_str()) {
+                continue;
+            }
+            let desired_prev = if pos == 0 {
+                None
+            } else {
+                Some(s.columns[pos - 1].name.as_str())
+            };
+            let tc = tgt_cols.get(sc.name.as_str()).unwrap();
+            let actual_prev = if tc.ordinal <= 1 {
+                None
+            } else {
+                t.columns
+                    .iter()
+                    .find(|c| c.ordinal == tc.ordinal - 1)
+                    .map(|c| c.name.as_str())
+            };
+            if desired_prev != actual_prev {
+                seen_mismatch = true;
+            }
+            if seen_mismatch {
+                position_change_names.push(sc.name.clone());
+            }
+        }
+    }
+    let position_set: std::collections::HashSet<&str> =
+        position_change_names.iter().map(|n| n.as_str()).collect();
+
+    // 组装 modifies（类型修改 + 位置变更），按源表列顺序，附带 AFTER/FIRST
+    let mut modifies: Vec<(&ColumnDef, Option<Option<String>>)> = Vec::new();
+    let mut last_source_name: Option<String> = None;
+    for sc in &s.columns {
+        let is_type_modify = type_modifies.iter().any(|(x, _)| x.name == sc.name);
+        let is_position_change = position_set.contains(sc.name.as_str());
+        if is_type_modify || is_position_change {
+            let after = if is_position_change {
+                Some(last_source_name.clone())
+            } else {
+                None
+            };
+            modifies.push((sc, after));
+        }
+        last_source_name = Some(sc.name.clone());
+    }
+
+    let drops: Vec<&ColumnDef> = t
+        .columns
+        .iter()
+        .filter(|tc| !src_cols.contains_key(tc.name.as_str()))
+        .collect();
+
+    let position_only_count = modifies.len() - type_modifies.len();
+    let n_combined = adds.len() + type_modifies.len() + position_only_count;
+    if n_combined > 1 {
+        let add_specs: Vec<(ColumnDef, Option<&str>)> = adds
+            .iter()
+            .map(|(c, after)| ((*c).clone(), after.as_deref()))
+            .collect();
+        let modify_specs: Vec<(ColumnDef, Option<Option<&str>>)> = modifies
+            .iter()
+            .map(|(c, after)| {
+                let a = after.as_ref().map(|o| o.as_deref());
+                ((*c).clone(), a)
+            })
+            .collect();
+        let source_desc = adds
+            .iter()
+            .map(|(c, _)| format!("+{}: {}", c.name, describe_column(c)))
+            .chain(
+                modifies
+                    .iter()
+                    .map(|(sc, _)| format!("~{}: {}", sc.name, describe_column(sc))),
+            )
+            .collect::<Vec<_>>()
+            .join("; ");
+        let target_desc = adds
+            .iter()
+            .map(|(c, _)| format!("+{}: {}", c.name, describe_column(c)))
+            .chain(
+                modifies
+                    .iter()
+                    .map(|(sc, _)| {
+                        let tc = tgt_cols.get(sc.name.as_str()).unwrap();
+                        format!("~{}: {}", sc.name, describe_column(tc))
+                    }),
+            )
+            .collect::<Vec<_>>()
+            .join("; ");
+        items.push(mk(
+            format!("col:{}:__combined__", s.name),
+            DiffKind::Column,
+            DiffAction::Modify,
+            format!("{} 个列变更", n_combined),
+            Some(source_desc),
+            Some(target_desc),
+            Some(sqlgen::alter_columns_sql(
+                db, &s.name, &add_specs, &modify_specs,
+            )),
+            false,
+        ));
+    } else {
+        for (sc, after) in &adds {
             items.push(mk(
-                format!("col:{}:{}", s.name, name),
+                format!("col:{}:{}", s.name, sc.name),
                 DiffKind::Column,
-                DiffAction::Drop,
-                name.to_string(),
-                None,
-                Some(describe_column(tc)),
-                Some(sqlgen::drop_column_sql(db, &s.name, name)),
-                true,
-            ));
-        }
-    }
-
-    // 索引
-    let src_idx: BTreeMap<&str, &IndexDef> =
-        s.indexes.iter().map(|i| (i.name.as_str(), i)).collect();
-    let tgt_idx: BTreeMap<&str, &IndexDef> =
-        t.indexes.iter().map(|i| (i.name.as_str(), i)).collect();
-
-    for (name, si) in &src_idx {
-        match tgt_idx.get(*name) {
-            None => items.push(mk(
-                format!("idx:{}:{}", s.name, name),
-                DiffKind::Index,
                 DiffAction::Create,
-                name.to_string(),
-                Some(describe_index(si)),
+                sc.name.clone(),
+                Some(describe_column(sc)),
                 None,
-                Some(sqlgen::add_index_sql(db, &s.name, si)),
+                Some(sqlgen::add_column_sql(db, &s.name, sc, after.as_deref())),
                 false,
-            )),
-            Some(ti) if si != ti => items.push(mk(
-                format!("idx:{}:{}", s.name, name),
-                DiffKind::Index,
+            ));
+        }
+        for (sc, after) in &modifies {
+            let after_ref = after.as_ref().map(|o| o.as_deref());
+            let tc = tgt_cols.get(sc.name.as_str()).unwrap();
+            items.push(mk(
+                format!("col:{}:{}", s.name, sc.name),
+                DiffKind::Column,
                 DiffAction::Modify,
-                name.to_string(),
-                Some(describe_index(si)),
-                Some(describe_index(ti)),
-                // MySQL 无法原地改索引：DROP + ADD 合并为一条 ALTER
-                Some(sqlgen::rebuild_index_sql(db, &s.name, si)),
+                sc.name.clone(),
+                Some(describe_column(sc)),
+                Some(describe_column(tc)),
+                Some(sqlgen::modify_column_sql(db, &s.name, sc, after_ref)),
                 false,
-            )),
-            _ => {}
+            ));
         }
     }
-    for (name, ti) in &tgt_idx {
-        if !src_idx.contains_key(*name) {
-            items.push(mk(
-                format!("idx:{}:{}", s.name, name),
-                DiffKind::Index,
-                DiffAction::Drop,
-                name.to_string(),
-                None,
-                Some(describe_index(ti)),
-                Some(sqlgen::drop_index_sql(db, &s.name, ti)),
-                true,
-            ));
+
+    for tc in &drops {
+        items.push(mk(
+            format!("col:{}:{}", s.name, tc.name),
+            DiffKind::Column,
+            DiffAction::Drop,
+            tc.name.clone(),
+            None,
+            Some(describe_column(tc)),
+            Some(sqlgen::drop_column_sql(db, &s.name, &tc.name)),
+            true,
+        ));
+    }
+
+    // 索引（可按配置跳过）
+    if options.compare_indexes {
+        let src_idx: BTreeMap<&str, &IndexDef> =
+            s.indexes.iter().map(|i| (i.name.as_str(), i)).collect();
+        let tgt_idx: BTreeMap<&str, &IndexDef> =
+            t.indexes.iter().map(|i| (i.name.as_str(), i)).collect();
+
+        for (name, si) in &src_idx {
+            match tgt_idx.get(*name) {
+                None => items.push(mk(
+                    format!("idx:{}:{}", s.name, name),
+                    DiffKind::Index,
+                    DiffAction::Create,
+                    name.to_string(),
+                    Some(describe_index(si)),
+                    None,
+                    Some(sqlgen::add_index_sql(db, &s.name, si)),
+                    false,
+                )),
+                Some(ti) if si != ti => {
+                    // 主键重建时若目标表有 AUTO_INCREMENT 列，需先去掉再改主键，最后加回
+                    let auto_inc_col = si.is_primary.then(|| {
+                        t.columns.iter().find(|c| c.extra.split_whitespace().any(|e| e == "auto_increment"))
+                    }).flatten();
+                    items.push(mk(
+                        format!("idx:{}:{}", s.name, name),
+                        DiffKind::Index,
+                        DiffAction::Modify,
+                        name.to_string(),
+                        Some(describe_index(si)),
+                        Some(describe_index(ti)),
+                        Some(sqlgen::rebuild_index_sql(db, &s.name, si, auto_inc_col)),
+                        false,
+                    ))
+                }
+                _ => {}
+            }
+        }
+        for (name, ti) in &tgt_idx {
+            if !src_idx.contains_key(*name) {
+                items.push(mk(
+                    format!("idx:{}:{}", s.name, name),
+                    DiffKind::Index,
+                    DiffAction::Drop,
+                    name.to_string(),
+                    None,
+                    Some(describe_index(ti)),
+                    Some(sqlgen::drop_index_sql(db, &s.name, ti)),
+                    true,
+                ));
+            }
         }
     }
 
@@ -260,6 +507,74 @@ fn cols_equal(a: &ColumnDef, b: &ColumnDef) -> bool {
         && a.default == b.default
         && a.extra == b.extra
         && a.comment == b.comment
+        && a.character_set == b.character_set
+        && a.collation == b.collation
+}
+
+fn diff_views(src: &[ViewDef], tgt: &[ViewDef], db: &str) -> Vec<DiffItem> {
+    let src_map: BTreeMap<&str, &ViewDef> =
+        src.iter().map(|v| (v.name.as_str(), v)).collect();
+    let tgt_map: BTreeMap<&str, &ViewDef> =
+        tgt.iter().map(|v| (v.name.as_str(), v)).collect();
+
+    let mut items = Vec::new();
+    for (name, sv) in &src_map {
+        match tgt_map.get(*name) {
+            None => items.push(DiffItem {
+                id: format!("view:{name}"),
+                kind: DiffKind::View,
+                action: DiffAction::Create,
+                table: name.to_string(),
+                name: name.to_string(),
+                source_desc: Some(sqlgen::describe_view(sv)),
+                target_desc: None,
+                sql: Some(sqlgen::create_view_sql(db, sv)),
+                dangerous: false,
+                source_ddl: Some(sqlgen::create_view_sql(db, sv)),
+                target_ddl: None,
+            }),
+            Some(tv) if !view_defs_equal(sv, tv) => {
+                let source_ddl = sqlgen::create_view_sql(db, sv);
+                let target_ddl = sqlgen::create_view_sql(db, tv);
+                items.push(DiffItem {
+                    id: format!("view:{name}"),
+                    kind: DiffKind::View,
+                    action: DiffAction::Modify,
+                    table: name.to_string(),
+                    name: name.to_string(),
+                    source_desc: Some(sqlgen::describe_view(sv)),
+                    target_desc: Some(sqlgen::describe_view(tv)),
+                    sql: Some(sqlgen::alter_view_sql(db, sv)),
+                    dangerous: false,
+                    source_ddl: Some(source_ddl),
+                    target_ddl: Some(target_ddl),
+                })
+            }
+            _ => {}
+        }
+    }
+    for (name, tv) in &tgt_map {
+        if !src_map.contains_key(*name) {
+            items.push(DiffItem {
+                id: format!("view:{name}"),
+                kind: DiffKind::View,
+                action: DiffAction::Drop,
+                table: name.to_string(),
+                name: name.to_string(),
+                source_desc: None,
+                target_desc: Some(sqlgen::describe_view(tv)),
+                sql: Some(sqlgen::drop_view_sql(db, tv)),
+                dangerous: true,
+                source_ddl: None,
+                target_ddl: Some(sqlgen::create_view_sql(db, tv)),
+            });
+        }
+    }
+    items
+}
+
+fn view_defs_equal(a: &ViewDef, b: &ViewDef) -> bool {
+    a.definition.trim() == b.definition.trim()
 }
 
 #[cfg(test)]
@@ -274,6 +589,10 @@ mod tests {
         TableDef { name: name.into(), engine: Some("InnoDB".into()), ..Default::default() }
             .with_columns(columns)
             .with_indexes(indexes)
+    }
+
+    fn diff(a: &SchemaSnapshot, b: &SchemaSnapshot) -> Vec<DiffItem> {
+        diff_snapshots(a, b, &CompareOptions::default())
     }
 
     // 小构造器
@@ -296,7 +615,11 @@ mod tests {
     }
 
     fn snap(db: &str, tables: Vec<TableDef>) -> SchemaSnapshot {
-        SchemaSnapshot { database: db.into(), tables }
+        SchemaSnapshot {
+            database: db.into(),
+            tables,
+            views: Vec::new(),
+        }
     }
 
     #[test]
@@ -306,18 +629,18 @@ mod tests {
             vec![table(
                 "t1",
                 vec![col("id", "bigint unsigned", false), col("name", "varchar(64)", true)],
-                vec![IndexDef { name: "PRIMARY".into(), is_primary: true, columns: vec!["id".into()], unique: true, index_type: Some("BTREE".into()) }],
+                vec![IndexDef { name: "PRIMARY".into(), is_primary: true, columns: vec!["id".into()], sub_parts: vec![], directions: vec![], unique: true, index_type: Some("BTREE".into()) }],
             )],
         );
         let b = snap("tgt", a.tables.clone());
-        assert!(diff_snapshots(&a, &b).is_empty());
+        assert!(diff(&a, &b).is_empty());
     }
 
     #[test]
     fn table_create_and_drop() {
         let src = snap("src", vec![table("t1", vec![col("id", "int", false)], vec![])]);
         let tgt = snap("tgt", vec![table("extra", vec![col("id", "int", false)], vec![])]);
-        let items = diff_snapshots(&src, &tgt);
+        let items = diff(&src, &tgt);
         assert_eq!(items.len(), 2);
         let create = items.iter().find(|i| i.id == "tbl:t1").unwrap();
         assert_eq!(create.action, DiffAction::Create);
@@ -327,6 +650,54 @@ mod tests {
         assert_eq!(drop.action, DiffAction::Drop);
         assert!(drop.dangerous);
         assert_eq!(drop.sql.as_deref(), Some("DROP TABLE `tgt`.`extra`"));
+    }
+
+    #[test]
+    fn table_rename_detected_when_structures_match() {
+        // 结构完全相同且名字有公共前缀 → 应识别为重命名，而不是 DROP + CREATE
+        let src = snap(
+            "src",
+            vec![table(
+                "tbl_new",
+                vec![col("id", "int", false), col("name", "varchar(64)", true)],
+                vec![IndexDef {
+                    name: "PRIMARY".into(),
+                    columns: vec!["id".into()],
+                    sub_parts: vec![None],
+                    directions: vec![None],
+                    unique: true,
+                    is_primary: true,
+                    index_type: Some("BTREE".into()),
+                }],
+            )],
+        );
+        let tgt = snap(
+            "tgt",
+            vec![table(
+                "tbl_old",
+                vec![col("id", "int", false), col("name", "varchar(64)", true)],
+                vec![IndexDef {
+                    name: "PRIMARY".into(),
+                    columns: vec!["id".into()],
+                    sub_parts: vec![None],
+                    directions: vec![None],
+                    unique: true,
+                    is_primary: true,
+                    index_type: Some("BTREE".into()),
+                }],
+            )],
+        );
+        let items = diff(&src, &tgt);
+        assert_eq!(items.len(), 1, "{items:?}");
+        let r = &items[0];
+        assert_eq!(r.id, "rename:tbl_old:tbl_new");
+        assert_eq!(r.action, DiffAction::Rename);
+        assert!(!r.dangerous);
+        let sql = r.sql.as_deref().unwrap();
+        assert!(
+            sql.contains("RENAME TABLE `tgt`.`tbl_old` TO `tgt`.`tbl_new`"),
+            "{sql}"
+        );
     }
 
     #[test]
@@ -355,18 +726,16 @@ mod tests {
                 vec![],
             )],
         );
-        let items = diff_snapshots(&src, &tgt);
-        assert_eq!(items.len(), 3, "{items:?}");
+        let items = diff(&src, &tgt);
+        // ADD + MODIFY 合并为一个 DiffItem；DROP 单独
+        assert_eq!(items.len(), 2, "{items:?}");
 
-        let add = items.iter().find(|i| i.id == "col:t:remark").unwrap();
-        assert_eq!(add.action, DiffAction::Create);
-        // AFTER 定位到源中前一列 name
-        assert!(add.sql.as_deref().unwrap().contains("AFTER `name`"));
-
-        let modify = items.iter().find(|i| i.id == "col:t:name").unwrap();
-        assert_eq!(modify.action, DiffAction::Modify);
-        assert!(modify.sql.as_deref().unwrap().contains("MODIFY COLUMN"));
-        assert_eq!(modify.source_desc.as_deref(), Some("varchar(255) NOT NULL"));
+        let combined = items.iter().find(|i| i.id == "col:t:__combined__").unwrap();
+        assert_eq!(combined.action, DiffAction::Modify);
+        let sql = combined.sql.as_deref().unwrap();
+        assert!(sql.starts_with("ALTER TABLE `tgt`.`t`"), "{sql}");
+        assert!(sql.contains("ADD COLUMN `remark` text NULL AFTER `name`"), "{sql}");
+        assert!(sql.contains("MODIFY COLUMN `name` varchar(255) NOT NULL"), "{sql}");
 
         let drop = items.iter().find(|i| i.id == "col:t:legacy").unwrap();
         assert_eq!(drop.action, DiffAction::Drop);
@@ -375,15 +744,91 @@ mod tests {
     }
 
     #[test]
+    fn multiple_columns_merged_into_single_alter() {
+        // 源表：id, a, b, c；目标表：id
+        // 新增 a/b/c 三个列应合并为一条 ALTER TABLE，且 AFTER 指向源中前一列
+        let src = snap(
+            "src",
+            vec![table(
+                "t",
+                vec![
+                    col("id", "int", false),
+                    col("a", "int", true),
+                    col("b", "int", true),
+                    col("c", "int", true),
+                ],
+                vec![],
+            )],
+        );
+        let tgt = snap("tgt", vec![table("t", vec![col("id", "int", false)], vec![])]);
+        let items = diff(&src, &tgt);
+        assert_eq!(items.len(), 1);
+        let combined = &items[0];
+        assert_eq!(combined.id, "col:t:__combined__");
+        let sql = combined.sql.as_deref().unwrap();
+        assert!(sql.starts_with("ALTER TABLE `tgt`.`t`"));
+        // 顺序：a 在 id 后，b 在 a 后，c 在 b 后
+        assert!(sql.contains("ADD COLUMN `a` int NULL AFTER `id`"), "{sql}");
+        assert!(sql.contains("ADD COLUMN `b` int NULL AFTER `a`"), "{sql}");
+        assert!(sql.contains("ADD COLUMN `c` int NULL AFTER `b`"), "{sql}");
+    }
+
+    #[test]
+    fn combined_column_descriptions_use_source_and_target_forms() {
+        // 源：id, name varchar(255)；目标：id, name varchar(64)
+        // 再加一个新增列 remark → 合并为一条 ALTER
+        let src = snap(
+            "src",
+            vec![table(
+                "t",
+                vec![
+                    col("id", "int", false),
+                    col("name", "varchar(255)", false),
+                    col("remark", "text", true),
+                ],
+                vec![],
+            )],
+        );
+        let tgt = snap(
+            "tgt",
+            vec![table(
+                "t",
+                vec![col("id", "int", false), col("name", "varchar(64)", false)],
+                vec![],
+            )],
+        );
+        let items = diff(&src, &tgt);
+        let combined = items.iter().find(|i| i.id == "col:t:__combined__").unwrap();
+        let sd = combined.source_desc.as_deref().unwrap();
+        let td = combined.target_desc.as_deref().unwrap();
+        // source_desc 应描述源端形态：新增列 + 修改后列
+        assert!(sd.contains("+remark: text NULL"), "source_desc: {sd}");
+        assert!(sd.contains("~name: varchar(255) NOT NULL"), "source_desc: {sd}");
+        // target_desc 应描述目标端形态：新增列 + 修改前列
+        assert!(td.contains("+remark: text NULL"), "target_desc: {td}");
+        assert!(td.contains("~name: varchar(64) NOT NULL"), "target_desc: {td}");
+    }
+
+    #[test]
+    fn table_drop_describes_columns_not_tables() {
+        let src = snap("src", vec![]);
+        let tgt = snap("tgt", vec![table("t", vec![col("id", "int", false), col("name", "varchar(64)", true)], vec![])]);
+        let items = diff(&src, &tgt);
+        let drop = items.iter().find(|i| i.id == "tbl:t").unwrap();
+        assert_eq!(drop.target_desc.as_deref(), Some("2 个列，待删除"));
+    }
+
+    #[test]
     fn first_added_column_uses_first_clause() {
-        // 源里 a 是第一列 → 新增到目标时用 FIRST
+        // 源里 a 是第一列 → 新增到目标时用 FIRST，同时 id 需要后移到 a 之后
         let src = snap("src", vec![table("t", vec![col("a", "int", true), col("id", "int", false)], vec![])]);
         let tgt = snap("tgt", vec![table("t", vec![col("id", "int", false)], vec![])]);
-        let items = diff_snapshots(&src, &tgt);
-        let add = items.iter().find(|i| i.id == "col:t:a").unwrap();
-        let sql = add.sql.as_deref().unwrap();
-        assert!(sql.ends_with("FIRST"), "{sql}");
-        // 中间列用 AFTER 前一列
+        let items = diff(&src, &tgt);
+        let combined = items.iter().find(|i| i.id == "col:t:__combined__").unwrap();
+        let sql = combined.sql.as_deref().unwrap();
+        assert!(sql.contains("ADD COLUMN `a` int NULL FIRST"), "{sql}");
+        assert!(sql.contains("MODIFY COLUMN `id` int NOT NULL AFTER `a`"), "{sql}");
+        // id 已存在不应有单独差异项
         let add_id = items.iter().find(|i| i.id == "col:t:id");
         assert!(add_id.is_none(), "id 已存在不应有差异项");
     }
@@ -393,6 +838,8 @@ mod tests {
         let idx = |name: &str, cols: &[&str], unique: bool| IndexDef {
             name: name.into(),
             columns: cols.iter().map(|s| s.to_string()).collect(),
+            sub_parts: vec![None; cols.len()],
+            directions: vec![None; cols.len()],
             unique,
             is_primary: name == "PRIMARY",
             index_type: Some("BTREE".into()),
@@ -413,7 +860,7 @@ mod tests {
                 vec![idx("PRIMARY", &["id"], true), idx("idx_old", &["b"], false)],
             )],
         );
-        let items = diff_snapshots(&src, &tgt);
+        let items = diff(&src, &tgt);
         assert_eq!(items.len(), 2);
         let add = items.iter().find(|i| i.id == "idx:t:idx_new").unwrap();
         assert!(add.sql.as_deref().unwrap().contains("ADD INDEX `idx_new` (`a`)"));
@@ -429,12 +876,255 @@ mod tests {
                 vec![idx("PRIMARY", &["id"], true), idx("idx_new", &["b"], false)],
             )],
         );
-        let items2 = diff_snapshots(&src, &tgt2);
+        let items2 = diff(&src, &tgt2);
         assert_eq!(items2.len(), 1);
         let m = &items2[0];
         assert_eq!(m.action, DiffAction::Modify);
         let sql = m.sql.as_deref().unwrap();
         assert!(sql.contains("DROP INDEX `idx_new`") && sql.contains("ADD INDEX `idx_new` (`a`)"), "{sql}");
+    }
+
+    #[test]
+    fn index_prefix_diff_detected() {
+        let idx = |name: &str, cols: &[&str], sub_parts: &[Option<u32>]| IndexDef {
+            name: name.into(),
+            columns: cols.iter().map(|s| s.to_string()).collect(),
+            sub_parts: sub_parts.to_vec(),
+            directions: vec![None; cols.len()],
+            unique: false,
+            is_primary: false,
+            index_type: Some("BTREE".into()),
+        };
+        let src = snap(
+            "src",
+            vec![table(
+                "t",
+                vec![col("a", "varchar(255)", true)],
+                vec![idx("idx_a", &["a"], &[None])],
+            )],
+        );
+        let tgt = snap(
+            "tgt",
+            vec![table(
+                "t",
+                vec![col("a", "varchar(255)", true)],
+                vec![idx("idx_a", &["a"], &[Some(10)])],
+            )],
+        );
+        let items = diff(&src, &tgt);
+        assert_eq!(items.len(), 1);
+        let sql = items[0].sql.as_deref().unwrap();
+        assert!(sql.contains("DROP INDEX `idx_a`"), "{sql}");
+        assert!(sql.contains("ADD INDEX `idx_a` (`a`)"), "{sql}");
+    }
+
+    #[test]
+    fn index_direction_diff_detected() {
+        let idx = |name: &str, cols: &[&str], dirs: &[Option<&str>]| IndexDef {
+            name: name.into(),
+            columns: cols.iter().map(|s| s.to_string()).collect(),
+            sub_parts: vec![None; cols.len()],
+            directions: dirs.iter().map(|d| d.map(|s| s.to_string())).collect(),
+            unique: false,
+            is_primary: false,
+            index_type: Some("BTREE".into()),
+        };
+        let src = snap(
+            "src",
+            vec![table(
+                "t",
+                vec![col("a", "int", true)],
+                vec![idx("idx_a", &["a"], &[Some("DESC")])],
+            )],
+        );
+        let tgt = snap(
+            "tgt",
+            vec![table(
+                "t",
+                vec![col("a", "int", true)],
+                vec![idx("idx_a", &["a"], &[None])],
+            )],
+        );
+        let items = diff(&src, &tgt);
+        assert_eq!(items.len(), 1);
+        let sql = items[0].sql.as_deref().unwrap();
+        assert!(sql.contains("DROP INDEX `idx_a`"), "{sql}");
+        assert!(sql.contains("ADD INDEX `idx_a` (`a` DESC)"), "{sql}");
+    }
+
+    #[test]
+    fn index_diffs_skipped_when_compare_indexes_false() {
+        let idx = |name: &str, cols: &[&str]| IndexDef {
+            name: name.into(),
+            columns: cols.iter().map(|s| s.to_string()).collect(),
+            sub_parts: vec![None; cols.len()],
+            directions: vec![None; cols.len()],
+            unique: false,
+            is_primary: false,
+            index_type: Some("BTREE".into()),
+        };
+        let src = snap(
+            "src",
+            vec![table(
+                "t",
+                vec![col("a", "int", true)],
+                vec![idx("idx_a", &["a"])],
+            )],
+        );
+        let tgt = snap(
+            "tgt",
+            vec![table("t", vec![col("a", "int", true)], vec![])],
+        );
+        let opts = CompareOptions {
+            compare_indexes: false,
+            ..Default::default()
+        };
+        let items = diff_snapshots(&src, &tgt, &opts);
+        assert!(items.is_empty(), "索引对比关闭时不应产生差异: {items:?}");
+    }
+
+    fn view(name: &str, definition: &str) -> ViewDef {
+        ViewDef {
+            name: name.into(),
+            definition: definition.into(),
+        }
+    }
+
+    fn snap_with_views(
+        db: &str,
+        tables: Vec<TableDef>,
+        views: Vec<ViewDef>,
+    ) -> SchemaSnapshot {
+        SchemaSnapshot {
+            database: db.into(),
+            tables,
+            views,
+        }
+    }
+
+    #[test]
+    fn view_diffs() {
+        let src = snap_with_views(
+            "src",
+            vec![],
+            vec![
+                view("v1", "SELECT `id` FROM `users`"),
+                view("v2", "SELECT 1"),
+            ],
+        );
+        let tgt = snap_with_views(
+            "tgt",
+            vec![],
+            vec![
+                view("v1", "SELECT `id`, `name` FROM `users`"),
+                view("v3", "SELECT 2"),
+            ],
+        );
+        let opts = CompareOptions {
+            compare_views: true,
+            ..Default::default()
+        };
+        let items = diff_snapshots(&src, &tgt, &opts);
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["view:v1", "view:v2", "view:v3"], "差异清单: {ids:?}");
+
+        let create = items.iter().find(|i| i.id == "view:v2").unwrap();
+        assert_eq!(create.action, DiffAction::Create);
+        assert!(
+            create.sql.as_deref().unwrap().contains("CREATE VIEW `tgt`.`v2`"),
+            "{}",
+            create.sql.as_deref().unwrap()
+        );
+
+        let alter = items.iter().find(|i| i.id == "view:v1").unwrap();
+        assert_eq!(alter.action, DiffAction::Modify);
+        assert!(
+            alter.sql.as_deref().unwrap().contains("ALTER VIEW `tgt`.`v1`"),
+            "{}",
+            alter.sql.as_deref().unwrap()
+        );
+
+        let drop = items.iter().find(|i| i.id == "view:v3").unwrap();
+        assert_eq!(drop.action, DiffAction::Drop);
+        assert!(drop.dangerous);
+    }
+
+    #[test]
+    fn view_diffs_skipped_by_default() {
+        let src = snap_with_views("src", vec![], vec![view("v1", "SELECT 1")]);
+        let tgt = snap_with_views("tgt", vec![], vec![]);
+        // 默认 compare_views = false
+        let items = diff(&src, &tgt);
+        assert!(items.is_empty(), "视图默认不参与对比: {items:?}");
+    }
+
+    #[test]
+    fn primary_key_rebuild_preserves_auto_increment() {
+        let idx =
+            |name: &str, cols: &[&str], unique: bool, primary: bool| IndexDef {
+                name: name.into(),
+                columns: cols.iter().map(|s| s.to_string()).collect(),
+                sub_parts: vec![None; cols.len()],
+                directions: vec![None; cols.len()],
+                unique,
+                is_primary: primary,
+                index_type: Some("BTREE".into()),
+            };
+        let mut id_col = col("id", "int", false);
+        id_col.extra = "auto_increment".into();
+        let src = snap(
+            "src",
+            vec![table(
+                "t",
+                vec![id_col.clone(), col("a", "int", false)],
+                vec![idx("PRIMARY", &["id", "a"], true, true)],
+            )],
+        );
+        let tgt = snap(
+            "tgt",
+            vec![table(
+                "t",
+                vec![id_col.clone(), col("a", "int", false)],
+                vec![idx("PRIMARY", &["id"], true, true)],
+            )],
+        );
+        let items = diff(&src, &tgt);
+        assert_eq!(items.len(), 1, "{items:?}");
+        let sql = items[0].sql.as_deref().unwrap();
+        // 先去掉 AUTO_INCREMENT，改主键，再加回 AUTO_INCREMENT
+        assert!(sql.contains("MODIFY COLUMN `id` int NOT NULL"), "{sql}");
+        assert!(sql.contains("DROP PRIMARY KEY"), "{sql}");
+        assert!(sql.contains("ADD PRIMARY KEY (`id`,`a`)"), "{sql}");
+        assert!(sql.contains("MODIFY COLUMN `id` int NOT NULL AUTO_INCREMENT"), "{sql}");
+    }
+
+    #[test]
+    fn column_order_change_detected() {
+        // 源：a, b, c；目标：a, c, b → b 需要移到 c 后面
+        let src = snap(
+            "src",
+            vec![table(
+                "t",
+                vec![col("a", "int", false), col("b", "int", true), col("c", "int", true)],
+                vec![],
+            )],
+        );
+        let tgt = snap(
+            "tgt",
+            vec![table(
+                "t",
+                vec![col("a", "int", false), col("c", "int", true), col("b", "int", true)],
+                vec![],
+            )],
+        );
+        let items = diff(&src, &tgt);
+        assert_eq!(items.len(), 1, "{items:?}");
+        let m = &items[0];
+        assert_eq!(m.id, "col:t:__combined__");
+        let sql = m.sql.as_deref().unwrap();
+        // b 和 c 都被标记为位置变更，按源顺序执行 MODIFY b AFTER a, MODIFY c AFTER b
+        assert!(sql.contains("MODIFY COLUMN `b` int NULL AFTER `a`"), "{sql}");
+        assert!(sql.contains("MODIFY COLUMN `c` int NULL AFTER `b`"), "{sql}");
     }
 
     #[test]
@@ -444,24 +1134,91 @@ mod tests {
         let mut tgt_t = table("t", vec![col("id", "int", false)], vec![]);
         tgt_t.comment = Some("旧注释".into());
         tgt_t.engine = Some("MyISAM".into());
-        let items = diff_snapshots(&snap("src", vec![src_t]), &snap("tgt", vec![tgt_t]));
+        let items = diff(&snap("src", vec![src_t]), &snap("tgt", vec![tgt_t]));
         assert_eq!(items.len(), 1);
         let sql = items[0].sql.as_deref().unwrap();
         assert!(sql.contains("ENGINE=InnoDB") && sql.contains("COMMENT='新注释'"), "{sql}");
     }
 
     #[test]
+    fn table_collation_diff() {
+        let mut src_t = table("t", vec![col("id", "int", false)], vec![]);
+        src_t.collation = Some("utf8mb4_general_ci".into());
+        let mut tgt_t = table("t", vec![col("id", "int", false)], vec![]);
+        tgt_t.collation = Some("utf8mb4_0900_ai_ci".into());
+        let items = diff(&snap("src", vec![src_t]), &snap("tgt", vec![tgt_t]));
+        assert_eq!(items.len(), 1);
+        let sql = items[0].sql.as_deref().unwrap();
+        assert!(
+            sql.contains("DEFAULT CHARACTER SET `utf8mb4` COLLATE `utf8mb4_general_ci`"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn column_collation_diff_detected() {
+        let col_coll = |name: &str, dt: &str, nullable: bool, collation: &str| ColumnDef {
+            name: name.into(),
+            data_type: dt.into(),
+            nullable,
+            collation: Some(collation.into()),
+            ..Default::default()
+        };
+        let src = snap(
+            "src",
+            vec![table(
+                "t",
+                vec![col_coll("name", "varchar(64)", false, "utf8mb4_general_ci")],
+                vec![],
+            )],
+        );
+        let tgt = snap(
+            "tgt",
+            vec![table(
+                "t",
+                vec![col_coll("name", "varchar(64)", false, "utf8mb4_0900_ai_ci")],
+                vec![],
+            )],
+        );
+        let items = diff(&src, &tgt);
+        assert_eq!(items.len(), 1);
+        let m = &items[0];
+        assert_eq!(m.id, "col:t:name");
+        let sql = m.sql.as_deref().unwrap();
+        assert!(sql.contains("COLLATE `utf8mb4_general_ci`"), "{sql}");
+        assert!(m.source_desc.as_deref().unwrap().contains("COLLATE=utf8mb4_general_ci"));
+        assert!(m.target_desc.as_deref().unwrap().contains("COLLATE=utf8mb4_0900_ai_ci"));
+    }
+
+    #[test]
     fn ordinal_change_alone_is_not_a_diff() {
         // 列对比忽略 ordinal：相同列集合（无论顺序）不产生差异
         let t = table("t", vec![col("id", "int", false), col("x", "int", true)], vec![]);
-        let items = diff_snapshots(&snap("s", vec![t.clone()]), &snap("t", vec![t]));
+        let items = diff(&snap("s", vec![t.clone()]), &snap("t", vec![t]));
         assert!(items.is_empty());
+    }
+
+    #[test]
+    fn zero_ordinal_does_not_panic() {
+        // 回归：ordinal 兜底为 0 时位置检测不得 u32 下溢 panic
+        // （真实库里 ORDINAL_POSITION 类型转换失败的兜底值曾导致对比挂死）
+        let cols = || {
+            vec![
+                ColumnDef { name: "id".into(), data_type: "int".into(), nullable: false, ordinal: 0, ..Default::default() },
+                ColumnDef { name: "name".into(), data_type: "varchar(64)".into(), nullable: true, ordinal: 0, ..Default::default() },
+            ]
+        };
+        let src = snap("src", vec![TableDef { name: "t".into(), columns: cols(), ..Default::default() }]);
+        let tgt = snap("tgt", vec![TableDef { name: "t".into(), columns: cols(), ..Default::default() }]);
+        // 只要不平 panic 即可；ordinal 全 0 时无法判断位置，不产生位置差异
+        let items = diff(&src, &tgt);
+        assert!(items.is_empty(), "{items:?}");
     }
 
     // ───────────────── e2e：docker/testenv（DBFLOW_E2E=1） ─────────────────
 
     mod e2e {
-        use super::super::diff_snapshots;
+        use super::diff;
         use crate::config::model::{ConnectionProfile, DatabaseKind, SshAuth, SshTunnelConfig};
         use crate::datasource::mysql::{self, ConnectEndpoint, MySqlLive};
         use crate::datasource::LiveConnection;
@@ -471,7 +1228,7 @@ mod tests {
             std::env::var("DBFLOW_E2E").is_ok()
         }
 
-        fn profile(host: &str, port: u16, pw: &str) -> ConnectionProfile {
+        fn profile(host: &str, port: u16, _pw: &str) -> ConnectionProfile {
             ConnectionProfile {
                 id: uuid::Uuid::new_v4(),
                 name: "e2e-compare".into(),
@@ -484,6 +1241,7 @@ mod tests {
                 default_database: None,
                 has_password: true,
                 ssh_has_password: false,
+                remember_password: false,
                 options: Default::default(),
                 ssh: None,
                 created_at: 0,
@@ -562,19 +1320,18 @@ mod tests {
             // 对比
             let snap_src = src.snapshot_schema("db_shop").await.expect("源快照");
             let snap_tgt = tgt.snapshot_schema("db_shop_old").await.expect("目标快照");
-            let items = diff_snapshots(&snap_src, &snap_tgt);
+            let items = diff(&snap_src, &snap_tgt);
             let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
             assert_eq!(
                 ids,
                 vec![
-                    "col:customer:level",      // 缺列 → 新增
-                    "col:customer:phone",      // varchar(20) vs varchar(32) → 修改
-                    "tblopt:orders",           // 表注释不同
-                    "col:orders:status",       // 缺列 → 新增
-                    "col:orders:remark",       // 目标多余列 → 删除
-                    "idx:orders:idx_customer", // 缺索引 → 新增
-                    "idx:orders:idx_amount",   // 目标多余索引 → 删除
-                    "tbl:promo",               // 目标多余表 → 删除
+                    "col:customer:__combined__", // level 缺列 + phone varchar 不同 → 合并为一条 ALTER
+                    "tblopt:orders",              // 表注释不同
+                    "col:orders:status",          // 缺列 → 新增
+                    "col:orders:remark",          // 目标多余列 → 删除
+                    "idx:orders:idx_customer",    // 缺索引 → 新增
+                    "idx:orders:idx_amount",      // 目标多余索引 → 删除
+                    "tbl:promo",                  // 目标多余表 → 删除
                 ],
                 "差异清单不符: {ids:?}"
             );
@@ -584,7 +1341,7 @@ mod tests {
             let promo = items.iter().find(|i| i.id == "tbl:promo").unwrap();
             assert!(promo.source_ddl.is_none(), "目标独有表不应有源 DDL");
             assert!(promo.target_ddl.as_deref().unwrap().contains("CREATE TABLE `db_shop_old`.`promo`"));
-            let phone = items.iter().find(|i| i.id == "col:customer:phone").unwrap();
+            let phone = items.iter().find(|i| i.id == "col:customer:__combined__").unwrap();
             assert!(
                 phone.source_ddl.as_deref().unwrap().contains("CREATE TABLE `db_shop`.`customer`")
                     && phone.source_ddl.as_deref().unwrap().contains("varchar(20)"),
@@ -604,7 +1361,7 @@ mod tests {
 
             // 复比应为空
             let snap_after = tgt.snapshot_schema("db_shop_old").await.expect("复比快照");
-            let remain = diff_snapshots(&snap_src, &snap_after);
+            let remain = diff(&snap_src, &snap_after);
             assert!(remain.is_empty(), "部署后仍有差异: {:?}", remain.iter().map(|i| &i.id).collect::<Vec<_>>());
 
             // 清理
@@ -684,7 +1441,7 @@ mod tests {
 
             let s = a.snapshot_schema("db_len_a").await.unwrap();
             let t = a.snapshot_schema("db_len_b").await.unwrap();
-            let items = diff_snapshots(&s, &t);
+            let items = diff(&s, &t);
             eprintln!("同版本差异: {items:#?}");
             let name_diff = items.iter().find(|i| i.id == "col:t1:name")
                 .unwrap_or_else(|| panic!("varchar(50) vs varchar(200) 没比出来！全部: {items:?}"));
@@ -715,7 +1472,7 @@ mod tests {
                 l56.execute(sql).await.unwrap();
             }
             let t56 = l56.snapshot_schema("db_len_c").await.unwrap();
-            let items_xv = diff_snapshots(&s, &t56);
+            let items_xv = diff(&s, &t56);
             eprintln!("跨版本差异: {items_xv:#?}");
             assert_eq!(items_xv.len(), 1, "跨版本应只有 name 一项真实差异: {items_xv:?}");
             assert_eq!(items_xv[0].id, "col:t1:name");
@@ -777,8 +1534,8 @@ mod tests {
             let l8 = MySqlLive::new(pool_a, None);
 
             let s8 = l8.snapshot_schema("db_shop_xv").await.unwrap();
-            let s56 = l56.snapshot_schema("db_shop_xv_xv").await.unwrap();
-            let items = diff_snapshots(&s8, &s56);
+            let s56 = l56.snapshot_schema("db_shop_xv").await.unwrap();
+            let items = diff(&s8, &s56);
             assert!(
                 items.is_empty(),
                 "8.4 vs 5.6 同构库出现假差异: {:?}",
@@ -820,14 +1577,14 @@ mod tests {
 
             let a = live.snapshot_schema("dbflow_cmp_a").await.expect("5.6 源快照");
             let b = live.snapshot_schema("dbflow_cmp_b").await.expect("5.6 目标快照");
-            let items = diff_snapshots(&a, &b);
+            let items = diff(&a, &b);
             assert_eq!(items.len(), 1, "{items:?}");
             assert_eq!(items[0].id, "tbl:t");
 
             live.execute(items[0].sql.as_deref().unwrap()).await.expect("5.6 建表部署失败");
 
             let b2 = live.snapshot_schema("dbflow_cmp_b").await.unwrap();
-            assert!(diff_snapshots(&a, &b2).is_empty(), "5.6 部署后仍有差异");
+            assert!(diff(&a, &b2).is_empty(), "5.6 部署后仍有差异");
 
             // 中文注释经 5.6 往返无损
             assert_eq!(b2.tables[0].comment.as_deref(), Some("测试表"));

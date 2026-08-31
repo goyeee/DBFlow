@@ -11,6 +11,7 @@ import {
   Select,
   Space,
   Tabs,
+  Typography,
   message,
 } from 'antd'
 import type { AppErrorInfo, ConnectionProfileInput, TestResult } from '../../api/types'
@@ -32,6 +33,7 @@ export interface FormValues {
   defaultDatabase: string | null
   dbPassword: string | null
   clearPassword: boolean
+  rememberPassword: boolean
   charset: string | null
   connectTimeoutSecs: number
   comment: string | null
@@ -73,6 +75,7 @@ export function valuesToInput(v: FormValues, editingId: string | null): Connecti
     port: v.port,
     user: v.user,
     defaultDatabase: emptyToNull(v.defaultDatabase),
+    rememberPassword: v.rememberPassword ?? false,
     options: {
       sslMode: v.sslMode,
       connectTimeoutSecs: v.connectTimeoutSecs,
@@ -144,6 +147,7 @@ export function ConnectionFormModal() {
       defaultDatabase: p?.defaultDatabase ?? '',
       dbPassword: '',
       clearPassword: false,
+      rememberPassword: p?.rememberPassword ?? false,
       charset: p?.options.charset ?? '',
       connectTimeoutSecs: p?.options.connectTimeoutSecs ?? 10,
       comment: p?.options.comment ?? '',
@@ -347,6 +351,15 @@ export function ConnectionFormModal() {
                       <Checkbox>清除已保存的密码</Checkbox>
                     </Form.Item>
                   )}
+                  <Form.Item name="rememberPassword" valuePropName="checked">
+                    <Checkbox>
+                      记住密码
+                      <Typography.Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+                        同时保存到本地文件（仅简单混淆，非加密），更新或重启应用后无需重新输入；SSH
+                        密码同样生效
+                      </Typography.Text>
+                    </Checkbox>
+                  </Form.Item>
                 </>
               ),
             },

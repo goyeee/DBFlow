@@ -8,6 +8,8 @@ export interface TableTab {
   connectionId: string
   database: string
   table: string
+  /** 首次单击为预览标签，双击/编辑后转正 */
+  preview?: boolean
 }
 
 export type WorkTab = TableTab
@@ -31,8 +33,17 @@ interface SessionState {
   loadTables: (id: string, database: string, force?: boolean) => Promise<TableBrief[]>
   /** 左上角刷新：强制重拉所有已连接会话的库列表，并清空表缓存（展开时重新拉） */
   refreshConnected: () => Promise<void>
+  /** 单击表：预览打开（同一时刻只有一个预览标签） */
+  previewTable: (connectionId: string, database: string, table: string) => void
+  /** 双击表/另存预览：正式打开 */
   openTable: (connectionId: string, database: string, table: string) => void
   closeTab: (key: string) => void
+  /** 关闭除 key 外的所有标签（key 不存在时清空全部） */
+  closeOtherTabs: (key: string) => void
+  /** 关闭 key 右侧的所有标签 */
+  closeTabsToRight: (key: string) => void
+  /** 关闭某连接某库下的所有表标签（导航树数据库节点右键"关闭"） */
+  closeDatabaseTabs: (connectionId: string, database: string) => void
   setActiveTab: (key: string | null) => void
   setError: (nodeKey: string, message: string | null) => void
 }
@@ -116,12 +127,51 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     await Promise.allSettled(ids.map((id) => get().loadDatabases(id, true)))
   },
 
+  previewTable: (connectionId, database, table) => {
+    const key = `${connectionId}/${database}/${table}`
+    set((s) => {
+      const existing = s.tabs.find((t) => t.key === key)
+      if (existing) {
+        return { activeTab: key }
+      }
+      const previewIdx = s.tabs.findIndex((t) => t.preview)
+      const tab: TableTab = {
+        key,
+        type: 'table',
+        connectionId,
+        database,
+        table,
+        preview: true,
+      }
+      const tabs =
+        previewIdx !== -1
+          ? s.tabs.map((t, i) => (i === previewIdx ? tab : t))
+          : [...s.tabs, tab]
+      return { tabs, activeTab: key }
+    })
+  },
+
   openTable: (connectionId, database, table) => {
     const key = `${connectionId}/${database}/${table}`
     set((s) => {
-      const tab: TableTab = { key, type: 'table', connectionId, database, table }
-      const tabs = s.tabs.some((t) => t.key === key) ? s.tabs : [...s.tabs, tab]
-      return { tabs, activeTab: key }
+      const idx = s.tabs.findIndex((t) => t.key === key)
+      if (idx !== -1) {
+        if (s.tabs[idx].preview) {
+          const tabs = [...s.tabs]
+          tabs[idx] = { ...tabs[idx], preview: false }
+          return { tabs, activeTab: key }
+        }
+        return { activeTab: key }
+      }
+      const tab: TableTab = {
+        key,
+        type: 'table',
+        connectionId,
+        database,
+        table,
+        preview: false,
+      }
+      return { tabs: [...s.tabs, tab], activeTab: key }
     })
   },
 
@@ -131,6 +181,41 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       return {
         tabs,
         activeTab: s.activeTab === key ? tabs[tabs.length - 1]?.key ?? null : s.activeTab,
+      }
+    }),
+
+  closeOtherTabs: (key) =>
+    set((s) => {
+      const tabs = s.tabs.filter((t) => t.key === key)
+      return {
+        tabs,
+        activeTab: s.activeTab && tabs.some((t) => t.key === s.activeTab) ? s.activeTab : tabs[0]?.key ?? null,
+      }
+    }),
+
+  closeTabsToRight: (key) =>
+    set((s) => {
+      const idx = s.tabs.findIndex((t) => t.key === key)
+      if (idx === -1) return {}
+      const tabs = s.tabs.slice(0, idx + 1)
+      return {
+        tabs,
+        activeTab: s.activeTab && tabs.some((t) => t.key === s.activeTab) ? s.activeTab : key,
+      }
+    }),
+
+  closeDatabaseTabs: (connectionId, database) =>
+    set((s) => {
+      const tabs = s.tabs.filter(
+        (t) => !(t.connectionId === connectionId && t.database === database),
+      )
+      if (tabs.length === s.tabs.length) return {}
+      return {
+        tabs,
+        activeTab:
+          s.activeTab && tabs.some((t) => t.key === s.activeTab)
+            ? s.activeTab
+            : tabs[0]?.key ?? null,
       }
     }),
 

@@ -16,6 +16,7 @@ function baseValues(ssh: FormValues['ssh']): FormValues {
     defaultDatabase: '',
     dbPassword: 'pw',
     clearPassword: false,
+    rememberPassword: false,
     charset: '',
     connectTimeoutSecs: 10,
     comment: '',
@@ -69,5 +70,11 @@ describe('valuesToInput 表单值 → 提交体', () => {
     )
     expect(input.ssh?.auth).toEqual({ type: 'privateKey', keyPath: '~/.ssh/id_ed25519' })
     expect(input.ssh?.targetHostOverride).toBe('10.0.0.5')
+  })
+
+  it('rememberPassword 透传到提交体（缺省按 false）', () => {
+    const off = baseValues({ enabled: false })
+    expect(valuesToInput({ ...off, rememberPassword: true }, null).rememberPassword).toBe(true)
+    expect(valuesToInput(off, null).rememberPassword).toBe(false)
   })
 })

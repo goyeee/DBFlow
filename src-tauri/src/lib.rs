@@ -24,6 +24,7 @@ pub fn run() {
         .setup(|app| {
             let config_dir = app.path().app_config_dir()?;
             std::fs::create_dir_all(&config_dir)?;
+            secret::init_local_dir(config_dir.clone());
             app.manage(config::store::ConnectionStore::new(config_dir));
             app.manage(datasource::Registry::default());
             app.manage(tunnel::TunnelManager::default());
@@ -41,6 +42,7 @@ pub fn run() {
             commands::groups::rename_group,
             commands::groups::delete_group,
             commands::compare::compare_schema,
+            commands::compare::compare_schema_multi,
             commands::compare::apply_sync,
             commands::explore::list_databases,
             commands::explore::list_tables,

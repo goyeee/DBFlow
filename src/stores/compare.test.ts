@@ -5,16 +5,20 @@ import type { DiffItem } from '../api/types'
 vi.mock('../api/commands', () => ({
   api: {
     listDatabases: vi.fn(async () => [{ name: 'db1' }, { name: 'db2' }]),
+    listTables: vi.fn(async () => [{ name: 't1' }, { name: 't2' }]),
     compareSchema: vi.fn(),
+    compareSchemaMulti: vi.fn(),
     applySync: vi.fn(),
     onCompareProgress: vi.fn(async () => () => {}),
+    onCompareMultiProgress: vi.fn(async () => () => {}),
   },
 }))
 
 import { api } from '../api/commands'
-import { buildDiffTree, collectItemIds, groupByAction, useCompareStore } from './compare'
+import { buildDiffTree, collectItemIds, emptyTargetState, groupByAction, useCompareStore } from './compare'
 
 const mockCompare = vi.mocked(api.compareSchema)
+const mockCompareMulti = vi.mocked(api.compareSchemaMulti)
 const mockApply = vi.mocked(api.applySync)
 
 const initialState = useCompareStore.getState()
@@ -22,6 +26,7 @@ const initialState = useCompareStore.getState()
 beforeEach(() => {
   useCompareStore.setState(initialState, true)
   mockCompare.mockReset()
+  mockCompareMulti.mockReset()
   mockApply.mockReset()
 })
 
@@ -190,6 +195,32 @@ describe('结构同步弹窗状态机', () => {
     expect(s.applying).toBe(false)
   })
 
+  it('setCompareOption 更新对比对象选项', () => {
+    useCompareStore.getState().setCompareOption('compareIndexes', false)
+    useCompareStore.getState().setCompareOption('compareViews', true)
+    expect(useCompareStore.getState().compareOptions).toEqual({
+      compareIndexes: false,
+      compareViews: true,
+    })
+  })
+
+  it('runCompare 把对比选项传给后端', async () => {
+    openWithEndpoints()
+    useCompareStore.setState({
+      compareOptions: { compareIndexes: false, compareViews: true },
+    })
+    mockCompare.mockResolvedValue([])
+    await useCompareStore.getState().runCompare()
+    expect(mockCompare).toHaveBeenCalledWith(
+      'c1',
+      'db1',
+      'c2',
+      'db2',
+      undefined,
+      { compareIndexes: false, compareViews: true },
+    )
+  })
+
   it('groupByAction 按 修改/创建/删除 分组', () => {
     const g = groupByAction([item('m', 'modify'), item('c', 'create'), item('d', 'drop', true)])
     expect(g.modify.map((i) => i.id)).toEqual(['m'])
@@ -260,6 +291,142 @@ function ditem(
   }
 }
 
+describe('多目标结构同步', () => {
+  it('单目标 → 多目标：把当前目标端点转为第一个目标', () => {
+    useCompareStore.setState({
+      modalOpen: true,
+      source: { connectionId: 'c1', database: 'db1' },
+      target: { connectionId: 'c2', database: 'db2' },
+      targetDbs: [{ name: 'db2' }],
+    })
+    useCompareStore.getState().setMode('multi')
+    const s = useCompareStore.getState()
+    expect(s.mode).toBe('multi')
+    expect(s.targets).toHaveLength(1)
+    expect(s.targets[0].connectionId).toBe('c2')
+    expect(s.targets[0].database).toBe('db2')
+    expect(s.activeTargetKey).toBe(s.targets[0].key)
+    expect(s.target).toEqual({ connectionId: null, database: null })
+  })
+
+  it('多目标 → 单目标：把激活目标端点转回单目标', () => {
+    useCompareStore.setState({
+      modalOpen: true,
+      mode: 'multi',
+      source: { connectionId: 'c1', database: 'db1' },
+      targets: [
+        { key: 'k1', connectionId: 'c2', database: 'db2', dbs: [{ name: 'db2' }], loadingDbs: false },
+        { key: 'k2', connectionId: 'c3', database: 'db3', dbs: [{ name: 'db3' }], loadingDbs: false },
+      ],
+      activeTargetKey: 'k2',
+    })
+    useCompareStore.getState().setMode('single')
+    const s = useCompareStore.getState()
+    expect(s.mode).toBe('single')
+    expect(s.target).toEqual({ connectionId: 'c3', database: 'db3' })
+    expect(s.targets).toHaveLength(0)
+  })
+
+  it('添加/删除目标', () => {
+    useCompareStore.setState({ mode: 'multi' })
+    useCompareStore.getState().addTarget()
+    useCompareStore.getState().addTarget()
+    expect(useCompareStore.getState().targets).toHaveLength(2)
+    const key = useCompareStore.getState().targets[0].key
+    useCompareStore.getState().removeTarget(key)
+    expect(useCompareStore.getState().targets).toHaveLength(1)
+  })
+
+  it('runCompareMulti 把结果分发到各目标并加载第一个目标', async () => {
+    useCompareStore.setState({
+      modalOpen: true,
+      mode: 'multi',
+      source: { connectionId: 'c1', database: 'db1' },
+      targets: [
+        { key: 'k1', connectionId: 'c2', database: 'db2', dbs: [], loadingDbs: false },
+        { key: 'k2', connectionId: 'c3', database: 'db3', dbs: [], loadingDbs: false },
+      ],
+      activeTargetKey: 'k1',
+    })
+    mockCompareMulti.mockResolvedValue([
+      { key: 'k1', connectionId: 'c2', database: 'db2', items: [item('a', 'create')], error: null },
+      { key: 'k2', connectionId: 'c3', database: 'db3', items: [item('b', 'drop', true)], error: null },
+    ])
+    await useCompareStore.getState().runCompareMulti()
+    const s = useCompareStore.getState()
+    expect(s.step).toBe('diff')
+    expect(s.targetStates['k1'].report).toHaveLength(1)
+    expect(s.targetStates['k2'].report).toHaveLength(1)
+    expect(s.report).toEqual(s.targetStates['k1'].report)
+    expect(mockCompareMulti).toHaveBeenCalledWith(
+      'c1',
+      'db1',
+      null,
+      [
+        { key: 'k1', connectionId: 'c2', database: 'db2' },
+        { key: 'k2', connectionId: 'c3', database: 'db3' },
+      ],
+      { compareIndexes: true, compareViews: false },
+    )
+  })
+
+  it('切换激活目标时状态隔离', () => {
+    const k1State = { ...emptyTargetState(), selectedIds: ['a'], report: [item('a', 'create')] }
+    const k2State = { ...emptyTargetState(), selectedIds: ['b'], report: [item('b', 'modify')] }
+    useCompareStore.setState({
+      mode: 'multi',
+      targets: [
+        { key: 'k1', connectionId: 'c2', database: 'db2', dbs: [], loadingDbs: false },
+        { key: 'k2', connectionId: 'c3', database: 'db3', dbs: [], loadingDbs: false },
+      ],
+      activeTargetKey: 'k1',
+      targetStates: { k1: k1State, k2: k2State },
+      ...k1State,
+    })
+    useCompareStore.getState().setActiveTarget('k2')
+    const s = useCompareStore.getState()
+    expect(s.selectedIds).toEqual(['b'])
+    expect(s.report?.[0].id).toBe('b')
+    // 切回 k1 应恢复
+    useCompareStore.getState().setActiveTarget('k1')
+    expect(useCompareStore.getState().selectedIds).toEqual(['a'])
+  })
+
+  it('多目标部署按激活目标连接执行', async () => {
+    useCompareStore.setState({
+      mode: 'multi',
+      source: { connectionId: 'c1', database: 'db1' },
+      targets: [
+        { key: 'k1', connectionId: 'c2', database: 'db2', dbs: [], loadingDbs: false },
+        { key: 'k2', connectionId: 'c3', database: 'db3', dbs: [], loadingDbs: false },
+      ],
+      activeTargetKey: 'k2',
+      step: 'deploy',
+      report: [item('a', 'create')],
+      selectedIds: ['a'],
+    })
+    mockApply.mockResolvedValue([{ sql: '-- a', ok: true, error: null }])
+    await useCompareStore.getState().deploy()
+    expect(mockApply).toHaveBeenCalledWith('c3', ['-- a'])
+  })
+
+  it('syncConnected 移除多目标中已断开的目标', () => {
+    useCompareStore.setState({
+      mode: 'multi',
+      source: { connectionId: 'c1', database: 'db1' },
+      targets: [
+        { key: 'k1', connectionId: 'c2', database: 'db2', dbs: [], loadingDbs: false },
+        { key: 'k2', connectionId: 'c3', database: 'db3', dbs: [], loadingDbs: false },
+      ],
+      activeTargetKey: 'k1',
+    })
+    useCompareStore.getState().syncConnected(['c1', 'c3'])
+    const s = useCompareStore.getState()
+    expect(s.targets.map((t) => t.key)).toEqual(['k2'])
+    expect(s.activeTargetKey).toBe('k2')
+  })
+})
+
 describe('buildDiffTree 结果页树构建', () => {
   const fixture: DiffItem[] = [
     ditem('tblopt:tA', 'table', 'modify', 'tA', '(表选项)'),
@@ -310,6 +477,31 @@ describe('buildDiffTree 结果页树构建', () => {
     expect(tC.targetName).toBe('tC')
   })
 
+  it('rename 项单独分组，源显示旧名、目标显示新名', () => {
+    const items: DiffItem[] = [
+      {
+        id: 'rename:old:new',
+        kind: 'table',
+        action: 'rename',
+        table: 'old',
+        name: 'new',
+        sourceDesc: 'source',
+        targetDesc: 'target',
+        sql: 'RENAME TABLE `old` TO `new`',
+        dangerous: false,
+        sourceDdl: null,
+        targetDdl: null,
+      },
+      ditem('tbl:tB', 'table', 'create', 'tB', 'tB'),
+    ]
+    const nodes = buildDiffTree(items, 'action')
+    expect(nodes.map((n) => n.key)).toEqual(['grp:create', 'grp:rename'])
+    const renameNode = nodes[1].children![0]
+    expect(renameNode.nodeType).toBe('item')
+    expect(renameNode.sourceName).toBe('old')
+    expect(renameNode.targetName).toBe('new')
+  })
+
   it('按对象分组：无分组行，表按名排序，混合操作挂同一表下', () => {
     const items: DiffItem[] = [
       ditem('col:tB:c1', 'column', 'modify', 'tB', 'c1'),
@@ -321,6 +513,17 @@ describe('buildDiffTree 结果页树构建', () => {
     expect(nodes.map((n) => n.table)).toEqual(['tA', 'tB'])
     const tB = nodes[1]
     expect(tB.children!.map((c) => c.key)).toEqual(['col:tB:c1', 'idx:tB:i1'])
+  })
+
+  it('视图差异按自身 action 分组', () => {
+    const items: DiffItem[] = [
+      ditem('view:v1', 'view', 'create', 'v1', 'v1'),
+      ditem('view:v2', 'view', 'drop', 'v2', 'v2', true),
+    ]
+    const nodes = buildDiffTree(items, 'action')
+    expect(nodes.map((n) => n.key)).toEqual(['grp:create', 'grp:drop'])
+    expect(nodes[0].children![0].nodeType).toBe('item')
+    expect(nodes[1].children![0].nodeType).toBe('item')
   })
 
   it('collectItemIds 收集全部叶子差异项', () => {
