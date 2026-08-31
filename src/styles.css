@@ -3,6 +3,22 @@ body,
 #root {
   height: 100%;
   margin: 0;
+  /* 工具软件默认全部禁止选中；可复制内容用下方白名单放行 */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 文本选中白名单：输入控件、SQL 视图、部署错误、表结构内容、Alert 错误信息 */
+input,
+textarea,
+[contenteditable='true'],
+.sql-view,
+.cmp-deploy-error,
+.ant-alert-message,
+.table-cols-view,
+.selectable {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 /* 整体壳 */
@@ -32,8 +48,12 @@ body,
 
 .sider {
   border-right: 1px solid rgba(5, 5, 5, 0.06);
+}
+
+.sider > .ant-layout-sider-children {
   display: flex;
   flex-direction: column;
+  height: 100%;
 }
 
 .sider-header {
@@ -53,6 +73,7 @@ body,
 .sider-body {
   flex: 1;
   overflow: auto;
+  min-height: 0;
   padding: 6px 4px;
   /* 树节点双击不出现文本拖蓝 */
   user-select: none;
@@ -61,6 +82,38 @@ body,
 
 .content {
   overflow: auto;
+}
+
+/* 表标签标题：固定宽度（按 "address@dev开发" 能完整显示定宽），超出省略号；
+   完整名由悬停弹层（.tab-tip，0.5s 延迟）展示 */
+.table-tab-label {
+  display: inline-block;
+  width: 160px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+  text-align: left;
+}
+
+/* 标签悬停全称弹层：跟随鼠标右下方，浅色低调，不抢注意力 */
+.tab-tip {
+  position: fixed;
+  z-index: 2000;
+  max-width: 360px;
+  padding: 3px 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: rgba(0, 0, 0, 0.55);
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid rgba(5, 5, 5, 0.08);
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  /* 不响应鼠标，避免弹层自己抢 hover 造成闪烁 */
+  pointer-events: none;
+  word-break: break-all;
 }
 
 .content-empty {
@@ -105,8 +158,8 @@ body,
 /* antd 6 的 className 直接加在 .ant-modal 面板元素上（不是后代）——
    用单类选择器命中它本身；内部结构是 container（不是旧版 content） */
 .sync-schema-modal {
-  top: 5vh;
-  height: 90vh;
+  top: 2vh;
+  height: 96vh;
   display: flex;
   flex-direction: column;
 }
@@ -121,7 +174,7 @@ body,
 
 .sync-schema-modal .ant-modal-header {
   flex: none;
-  padding: 8px 16px;
+  padding: 6px 12px;
   margin-bottom: 0;
 }
 
@@ -130,16 +183,16 @@ body,
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  padding: 4px 14px 8px;
+  padding: 1px 8px 4px;
 }
 
 /* 步骤标题：正常文档流，位于数据库摘要上方（页面顶部、居中、小字） */
 .cmp-step-title {
   flex: none;
   text-align: center;
-  font-size: 12px;
+  font-size: 11px;
   color: #888;
-  padding: 2px 0 4px;
+  padding: 0 0 1px;
   user-select: none;
   -webkit-user-select: none;
 }
@@ -157,16 +210,18 @@ body,
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  padding: 0 0 5px;
+  gap: 4px;
+  padding: 2px 0 5px;
   border-bottom: 1px solid rgba(5, 5, 5, 0.06);
-  margin-bottom: 6px;
+  margin-bottom: 4px;
   flex: none;
 }
 
 .cmp-summary-text {
   text-align: left;
   line-height: 1.25;
+  min-width: 0;
+  max-width: 420px;
 }
 
 .cmp-summary-text.right {
@@ -174,24 +229,27 @@ body,
 }
 
 .cmp-summary-conn {
-  font-size: 11.5px;
+  font-size: 11px;
   color: #555;
 }
 
 .cmp-summary-db {
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 600;
   color: #111;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .cmp-summary-icon {
-  font-size: 15px;
+  font-size: 13px;
 }
 
 .cmp-summary-arrow {
   color: #999;
-  margin: 0 3px;
-  font-size: 11px;
+  margin: 0 2px;
+  font-size: 10px;
 }
 
 .cmp-step-body {
@@ -242,8 +300,8 @@ body,
   flex: 1;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 56px;
-  padding: 14px 24px 4px;
+  gap: 40px;
+  padding: 8px 16px 2px;
   min-height: 0;
   overflow: auto;
 }
@@ -253,8 +311,8 @@ body,
   content: '';
   position: absolute;
   left: 50%;
-  top: 20px;
-  bottom: 12px;
+  top: 14px;
+  bottom: 8px;
   width: 1px;
   background: rgba(5, 5, 5, 0.07);
 }
@@ -266,44 +324,120 @@ body,
 .cmp-pane-title {
   color: #1677ff;
   font-weight: 600;
-  font-size: 13px;
-  margin-bottom: 8px;
+  font-size: 12px;
+  margin-bottom: 6px;
 }
 
 .cmp-field {
-  margin-bottom: 10px;
+  margin-bottom: 6px;
 }
 
 .cmp-field-label {
-  font-size: 12.5px;
+  font-size: 11.5px;
   color: #333;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
 }
 
 .cmp-swap {
   position: absolute;
   left: 50%;
-  top: 92px;
+  top: 78px;
   transform: translateX(-50%);
   z-index: 1;
   background: #fff;
-  padding: 4px 2px;
+  padding: 2px 1px;
+}
+
+/* 多目标模式：右侧面板为可滚动目标列表 */
+.cmp-panes.multi .cmp-targets-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.cmp-targets-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid rgba(5, 5, 5, 0.08);
+  border-radius: 6px;
+  padding: 6px;
+}
+
+.cmp-target-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px;
+  border-radius: 6px;
+  background: rgba(5, 5, 5, 0.02);
+  margin-bottom: 6px;
+}
+
+.cmp-target-row:last-child {
+  margin-bottom: 0;
+}
+
+.cmp-target-index {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  line-height: 16px;
+  text-align: center;
+  border-radius: 50%;
+  background: #1677ff;
+  color: #fff;
+  font-size: 10px;
+  margin-top: 5px;
+}
+
+.cmp-target-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.cmp-target-fields {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.cmp-target-info {
+  font-size: 11px;
+  color: #888;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 结果/部署页的目标 Tabs */
+.cmp-target-tabs {
+  flex: none;
+  margin-bottom: 2px;
+}
+
+.cmp-target-tab-label {
+  display: inline-flex;
+  align-items: center;
 }
 
 /* 信息块：竖排逐行 标签: 值（紧凑行距） */
 .cmp-pane-info {
-  margin-top: 26px;
+  margin-top: 12px;
 }
 
 .cmp-info-row {
   display: flex;
-  line-height: 1.8;
-  font-size: 12.5px;
+  line-height: 1.5;
+  font-size: 11.5px;
 }
 
 .cmp-info-label {
   flex: none;
-  width: 88px;
+  width: 70px;
   color: #666;
 }
 
@@ -326,34 +460,34 @@ body,
 }
 
 .cmp-progress-card {
-  width: 460px;
+  width: 400px;
   background: #fff;
   border-radius: 8px;
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
-  padding: 20px 24px;
+  padding: 16px 20px;
 }
 
 .cmp-progress-title {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
-  margin-bottom: 14px;
+  margin-bottom: 10px;
 }
 
 .cmp-progress-phase {
-  font-size: 12px;
+  font-size: 11px;
   color: #666;
-  margin: 8px 0 12px;
+  margin: 6px 0 10px;
 }
 
 /* ── 第二步：对比结果 ── */
 .cmp-diff-toolbar {
   flex: none;
-  margin-bottom: 6px;
+  margin-bottom: 2px;
 }
 
 .cmp-tree-wrap {
   flex: 1;
-  min-height: 100px;
+  min-height: 240px;
   overflow: auto;
   border: 1px solid rgba(5, 5, 5, 0.08);
   border-radius: 6px;
@@ -362,10 +496,10 @@ body,
 /* 上下两区域之间的可拖拽分隔条 */
 .cmp-resizer {
   flex: none;
-  height: 6px;
-  margin: 4px 0;
+  height: 3px;
+  margin: 1px 0;
   cursor: row-resize;
-  border-radius: 3px;
+  border-radius: 2px;
   position: relative;
   transition: background 0.15s;
 }
@@ -376,9 +510,9 @@ body,
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  width: 44px;
-  height: 3px;
-  border-radius: 2px;
+  width: 32px;
+  height: 2px;
+  border-radius: 1px;
   background: #c2cad6;
 }
 
@@ -390,21 +524,21 @@ body,
   background: #4a90d9;
 }
 
-/* 紧凑行距 + 小字号（Navicat 风，行高 ~24px） */
+/* 紧凑行距 + 小字号（Navicat 风，行高 ~20px） */
 .diff-tree .ant-table {
-  font-size: 12px;
+  font-size: 11.5px;
 }
 
 .diff-tree .ant-table-thead > tr > th {
-  padding: 4px 6px;
-  font-size: 12px;
+  padding: 2px 6px;
+  font-size: 11.5px;
   font-weight: 500;
   color: #666;
   background: #fff;
 }
 
 .diff-tree .ant-table-tbody > tr > td {
-  padding: 2px 6px;
+  padding: 1px 6px;
 }
 
 .diff-tree .ant-table-tbody > tr:hover > td {
@@ -417,6 +551,7 @@ body,
 
 .dt-group-title {
   font-weight: 600;
+  font-size: 11.5px;
 }
 
 /* 只有点击选中的行给背景（Navicat 深蓝底白字）；勾选不染色 */
@@ -443,11 +578,12 @@ body,
 
 .dt-name {
   font-weight: 500;
+  font-size: 11.5px;
 }
 
 .dt-desc {
   color: #999;
-  font-size: 12px;
+  font-size: 11px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -457,7 +593,7 @@ body,
 
 .dt-danger {
   color: #ff4d4f;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 /* 首列控制区：勾选框 + 折叠箭头（同列，随层级缩进） */
@@ -524,12 +660,12 @@ body,
 
 .cmp-bottom-tabs > .ant-tabs-nav {
   flex: none;
-  margin-bottom: 4px;
+  margin-bottom: 1px;
 }
 
 .cmp-bottom-tabs > .ant-tabs-nav .ant-tabs-tab {
-  padding: 4px 12px;
-  font-size: 12.5px;
+  padding: 2px 8px;
+  font-size: 11.5px;
 }
 
 /* 内容区（antd 6 实际类名是 body-holder，不是 content-holder）：
@@ -559,7 +695,7 @@ body,
 
 .cmp-ddl-compare {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   height: 100%;
 }
 
@@ -571,9 +707,9 @@ body,
 }
 
 .cmp-ddl-pane-title {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
-  padding: 4px 8px;
+  padding: 3px 6px;
   flex: none;
   background: #fafafa;
   border: 1px solid rgba(5, 5, 5, 0.08);
@@ -582,10 +718,10 @@ body,
 }
 
 .cmp-ddl-side-tag {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 400;
-  margin-left: 8px;
-  padding: 0 6px;
+  margin-left: 6px;
+  padding: 0 4px;
   border-radius: 3px;
 }
 
@@ -608,9 +744,9 @@ body,
   border-radius: 4px;
   background: #fff;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11.5px;
-  line-height: 1.5;
-  padding: 4px 12px;
+  font-size: 11px;
+  line-height: 1.45;
+  padding: 3px 8px;
   /* DDL/部署脚本禁止双击三击误选，但保留可拖拽选择（复制用） */
 }
 
@@ -680,14 +816,14 @@ body,
   flex: none;
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
-  margin-top: 8px;
-  padding-top: 8px;
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 6px;
   border-top: 1px solid rgba(5, 5, 5, 0.06);
 }
 
 .cmp-deploy-list {
-  margin-top: 8px;
+  margin-top: 6px;
   flex: 1;
   min-height: 120px;
   overflow: auto;
@@ -696,8 +832,8 @@ body,
 .cmp-deploy-item {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
-  margin-bottom: 6px;
+  gap: 6px;
+  margin-bottom: 4px;
 }
 
 .cmp-deploy-no {
@@ -710,7 +846,7 @@ body,
 }
 
 .cmp-deploy-sql .sql-view {
-  max-height: 132px;
+  max-height: 100px;
 }
 
 /* DDL 面板标题栏与下方 SQL 区连成一体 */
@@ -720,8 +856,53 @@ body,
 
 .cmp-deploy-error {
   color: #ff4d4f;
-  font-size: 12.5px;
+  font-size: 11.5px;
   margin-bottom: 2px;
+}
+
+/* 弹窗内 antd 控件紧凑化 */
+.sync-schema-modal .ant-select .ant-select-selector {
+  min-height: 26px;
+}
+
+.sync-schema-modal .ant-select-single .ant-select-selector {
+  height: 26px;
+}
+
+.sync-schema-modal .ant-select-single .ant-select-selector .ant-select-selection-item,
+.sync-schema-modal .ant-select-single .ant-select-selector .ant-select-selection-placeholder {
+  line-height: 24px;
+}
+
+.sync-schema-modal .ant-select-multiple .ant-select-selection-item {
+  height: 18px;
+  line-height: 16px;
+  font-size: 11px;
+}
+
+.sync-schema-modal .ant-btn {
+  padding: 2px 10px;
+  height: 26px;
+  font-size: 12px;
+}
+
+.sync-schema-modal .ant-segmented {
+  padding: 2px;
+}
+
+.sync-schema-modal .ant-segmented-item {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.sync-schema-modal .ant-alert {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.sync-schema-modal .ant-tabs-tab {
+  padding: 4px 10px;
+  font-size: 12px;
 }
 
 /* 对比视图 SQL 预览 */

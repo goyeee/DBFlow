@@ -9,6 +9,15 @@ import './styles.css'
 
 dayjs.locale('zh-cn')
 
+// 全局禁用 webview 默认右键菜单（Reload / Inspect Element）。
+// 放行输入控件（复制/粘贴/全选的编辑菜单）；树节点的自定义右键菜单走
+// React 合成事件，preventDefault 不影响它。
+document.addEventListener('contextmenu', (e) => {
+  const el = e.target as HTMLElement | null
+  if (el?.closest('input, textarea, [contenteditable="true"]')) return
+  e.preventDefault()
+})
+
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
     <ConfigProvider locale={zhCN} theme={{}}>

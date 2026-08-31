@@ -1,5 +1,5 @@
-import { useEffect } from 'react'
-import { Button, Empty, Layout, Menu, Space, Tabs, Tooltip, message } from 'antd'
+import { useEffect, useRef, useState } from 'react'
+import { Button, Dropdown, Empty, Layout, Menu, Space, Tabs, Tooltip, message } from 'antd'
 import {
   FolderAddOutlined,
   ImportOutlined,
@@ -13,6 +13,7 @@ import { useCompareStore } from '../../stores/compare'
 import { useSessionStore } from '../../stores/session'
 import { useUiStore } from '../../stores/ui'
 import { ConnectionTree } from '../connection/ConnectionTree'
+import { COLOR_PRESETS } from '../connection/colors'
 import { TableColumnsView } from '../table/TableColumnsView'
 import { SyncSchemaModal } from '../compare/SyncSchemaModal'
 import { errText } from '../connection/ConnectionTree'
@@ -27,6 +28,34 @@ export function AppShell() {
   const activeTab = useSessionStore((s) => s.activeTab)
   const setActiveTab = useSessionStore((s) => s.setActiveTab)
   const closeTab = useSessionStore((s) => s.closeTab)
+  const closeOtherTabs = useSessionStore((s) => s.closeOtherTabs)
+  const closeTabsToRight = useSessionStore((s) => s.closeTabsToRight)
+  const openTable = useSessionStore((s) => s.openTable)
+  const revealInTree = useUiStore((s) => s.revealInTree)
+  const connections = useConnectionsStore((s) => s.connections)
+
+  // 标签悬停全称弹层：0.5s 后显示在鼠标右下方（浅色自定义弹层，不用黑底 Tooltip）
+  const [tabTip, setTabTip] = useState<{ x: number; y: number; title: string } | null>(null)
+  const tipTimer = useRef<number | undefined>(undefined)
+  const showTipLater = (e: React.MouseEvent, title: string) => {
+    const { clientX, clientY } = e
+    window.clearTimeout(tipTimer.current)
+    tipTimer.current = window.setTimeout(() => {
+      // 贴右边缘时往回拨，防止弹层超出视口
+      const x = Math.min(clientX + 12, window.innerWidth - 380)
+      setTabTip({ x, y: clientY + 16, title })
+    }, 500)
+  }
+  const hideTip = () => {
+    window.clearTimeout(tipTimer.current)
+    setTabTip(null)
+  }
+
+  const tabColor = (connectionId: string) => {
+    const c = connections.find((x) => x.id === connectionId)
+    if (!c?.color) return undefined
+    return COLOR_PRESETS[c.color] ?? c.color
+  }
 
   useEffect(() => {
     load().catch((e) => message.error(errText(e)))
@@ -118,17 +147,73 @@ export function AppShell() {
               onEdit={(k, action) => {
                 if (action === 'remove') closeTab(String(k))
               }}
-              items={tabs.map((t) => ({
-                key: t.key,
-                label: `${t.database}/${t.table}`,
-                children: <TableColumnsView tab={t} />,
-              }))}
+              items={tabs.map((t, i) => {
+                const color = tabColor(t.connectionId)
+                const connName = connections.find((c) => c.id === t.connectionId)?.name
+                // 表名@数据库名(连接名)
+                const title = `${t.table}@${t.database}${connName ? `(${connName})` : ''}`
+                return {
+                  key: t.key,
+                  label: (
+                    <Dropdown
+                      trigger={['contextMenu']}
+                      menu={{
+                        items: [
+                          { key: 'close', label: '关闭' },
+                          {
+                            key: 'close-right',
+                            label: '关闭右侧',
+                            disabled: i === tabs.length - 1,
+                          },
+                          {
+                            key: 'close-others',
+                            label: '关闭其他',
+                            disabled: tabs.length <= 1,
+                          },
+                          { type: 'divider' },
+                          { key: 'reveal', label: '导航栏打开' },
+                        ],
+                        onClick: ({ key: action }) => {
+                          if (action === 'close') closeTab(t.key)
+                          else if (action === 'close-right') closeTabsToRight(t.key)
+                          else if (action === 'close-others') closeOtherTabs(t.key)
+                          else if (action === 'reveal')
+                            revealInTree(t.connectionId, t.database, t.table)
+                        },
+                      }}
+                    >
+                      <span
+                        className="table-tab-label"
+                        onDoubleClick={() =>
+                          openTable(t.connectionId, t.database, t.table)
+                        }
+                        onMouseEnter={(e) => showTipLater(e, title)}
+                        onMouseLeave={hideTip}
+                        onContextMenu={hideTip}
+                        style={{
+                          fontStyle: t.preview ? 'italic' : undefined,
+                          borderBottom: color ? `3px solid ${color}` : undefined,
+                        }}
+                      >
+                        {title}
+                      </span>
+                    </Dropdown>
+                  ),
+                  children: <TableColumnsView tab={t} />,
+                }
+              })}
             />
           )}
         </Layout.Content>
       </Layout>
 
       <SyncSchemaModal />
+
+      {tabTip && (
+        <div className="tab-tip" style={{ left: tabTip.x, top: tabTip.y }}>
+          {tabTip.title}
+        </div>
+      )}
     </Layout>
   )
 }

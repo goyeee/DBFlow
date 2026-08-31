@@ -3,6 +3,8 @@ import { listen } from '@tauri-apps/api/event'
 import type {
   ApplyResultItem,
   ColumnBrief,
+  CompareOptions,
+  CompareTargetSpec,
   ConfigSnapshot,
   DiffItem,
   ConnectionGroup,
@@ -14,6 +16,7 @@ import type {
   NavicatImportResult,
   NavicatImportSelection,
   TableBrief,
+  TargetReport,
   TestResult,
 } from './types'
 
@@ -67,12 +70,30 @@ export const api = {
     sourceDatabase: string,
     targetConnectionId: string,
     targetDatabase: string,
+    tables?: string[],
+    options?: CompareOptions,
   ) =>
     invoke<DiffItem[]>('compare_schema', {
       sourceConnectionId,
       sourceDatabase,
       targetConnectionId,
       targetDatabase,
+      tables: tables ?? null,
+      options: options ?? null,
+    }),
+  compareSchemaMulti: (
+    sourceConnectionId: string,
+    sourceDatabase: string,
+    tables: string[] | null,
+    targets: CompareTargetSpec[],
+    options?: CompareOptions,
+  ) =>
+    invoke<TargetReport[]>('compare_schema_multi', {
+      sourceConnectionId,
+      sourceDatabase,
+      tables,
+      targets,
+      options: options ?? null,
     }),
   applySync: (targetConnectionId: string, sqls: string[]) =>
     invoke<ApplyResultItem[]>('apply_sync', { targetConnectionId, sqls }),
@@ -80,6 +101,13 @@ export const api = {
   /** 对比进度事件（fetch_source/fetch_target/diff），返回取消监听函数 */
   onCompareProgress: (cb: (phase: string) => void) =>
     listen<string>('compare-progress', (e) => cb(e.payload)),
+  /** 多目标对比进度事件 */
+  onCompareMultiProgress: (
+    cb: (e: { index: number; total: number; phase: string; database: string }) => void,
+  ) => listen<{ index: number; total: number; phase: string; database: string }>(
+    'compare-multi-progress',
+    (e) => cb(e.payload),
+  ),
 
   openConfigDir: () => invoke<void>('open_config_dir'),
 }

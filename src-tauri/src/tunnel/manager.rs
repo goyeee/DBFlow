@@ -198,6 +198,7 @@ mod e2e_tests {
             default_database: None,
             has_password: true,
             ssh_has_password: true,
+            remember_password: false,
             options: Default::default(),
             ssh: None,
             created_at: 0,

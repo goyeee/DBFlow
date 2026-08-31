@@ -66,6 +66,32 @@ fn validate_input(input: &ConnectionProfileInput) -> AppResult<()> {
     Ok(())
 }
 
+/// 按"记住密码"开关把密码同步到本地 secrets.json：
+/// - 勾选 + 本次提交了新密码 → 落盘
+/// - 勾选 + 密码未改（None）→ 尝试把已有密码补写进本地文件（读不到就算了，下次保存再写）
+/// - 未勾选 → 删掉本地副本（密码只留钥匙串）
+fn sync_local(
+    id: Uuid,
+    kind: SecretKind,
+    remember: bool,
+    new_password: Option<&str>,
+    has_password: bool,
+) -> AppResult<()> {
+    match (remember, new_password) {
+        (true, Some(p)) if !p.is_empty() => secret::set_local(id, kind, p)?,
+        (true, _) if has_password => {
+            if let Ok(Some(p)) = secret::get(id, kind) {
+                let _ = secret::set_local(id, kind, &p);
+            }
+        }
+        (false, _) => {
+            let _ = secret::delete_local(id, kind);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// 新建/编辑合一。密码参数语义：None = 不变；Some("") = 清除；Some(p) = 设置。
 #[tauri::command]
 pub async fn save_connection(
@@ -78,6 +104,7 @@ pub async fn save_connection(
 ) -> AppResult<ConnectionProfile> {
     validate_input(&input)?;
     let now = now_epoch();
+    let remember = input.remember_password;
 
     let (id, created_at, mut has_password, mut ssh_has_password) = match input.id {
         Some(id) => {
@@ -107,9 +134,11 @@ pub async fn save_connection(
             has_password = true;
         }
     }
+    sync_local(id, SecretKind::Db, remember, db_password.as_deref(), has_password)?;
 
     // SSH 密码 / 私钥口令共用一个槽位（同一时刻只有一种认证方式生效）
-    if let Some(p) = ssh_password.as_ref().or(ssh_key_passphrase.as_ref()) {
+    let ssh_new = ssh_password.as_ref().or(ssh_key_passphrase.as_ref());
+    if let Some(p) = ssh_new {
         if p.is_empty() {
             secret::delete(id, SecretKind::Ssh)?;
             ssh_has_password = false;
@@ -119,10 +148,12 @@ pub async fn save_connection(
         }
     }
 
-    // 不再使用隧道时清掉残留的 SSH 凭据
+    // 不再使用隧道时清掉残留的 SSH 凭据（delete 会一并清理本地 secrets.json）
     if input.ssh.is_none() {
         secret::delete(id, SecretKind::Ssh)?;
         ssh_has_password = false;
+    } else {
+        sync_local(id, SecretKind::Ssh, remember, ssh_new.map(String::as_str), ssh_has_password)?;
     }
 
     let profile = ConnectionProfile {
@@ -142,6 +173,7 @@ pub async fn save_connection(
             .map(str::to_string),
         has_password,
         ssh_has_password,
+        remember_password: remember,
         options: input.options,
         ssh: input.ssh,
         created_at,
@@ -320,6 +352,7 @@ async fn run_test(
         default_database: input.default_database.clone(),
         has_password: false,
         ssh_has_password: false,
+        remember_password: false,
         options: input.options.clone(),
         ssh: None,
         created_at: 0,
@@ -459,6 +492,7 @@ mod tests {
             port: 3306,
             user: "root".into(),
             default_database: None,
+            remember_password: false,
             options: Default::default(),
             ssh: Some(SshTunnelConfig {
                 host: "127.0.0.1".into(),

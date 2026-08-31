@@ -1,6 +1,16 @@
 import { create } from 'zustand'
 import { api } from '../api/commands'
-import type { ApplyResultItem, DatabaseBrief, DiffAction, DiffItem, DiffKind } from '../api/types'
+import type {
+  AppErrorInfo,
+  ApplyResultItem,
+  CompareOptions,
+  CompareTargetSpec,
+  DatabaseBrief,
+  DiffAction,
+  DiffItem,
+  DiffKind,
+  TableBrief,
+} from '../api/types'
 
 /** Navicat 式结构同步：选择 → 对比结果 → 部署 三步弹窗的状态机 */
 export type CompareStep = 'select' | 'diff' | 'deploy'
@@ -12,7 +22,42 @@ export interface CompareEndpoint {
 
 const EMPTY_ENDPOINT: CompareEndpoint = { connectionId: null, database: null }
 
-/** 结果页分组方式（Navicat 左上角下拉） */
+/** 多目标模式下每个目标的端点 + UI 状态 */
+export interface MultiTarget {
+  key: string
+  connectionId: string | null
+  database: string | null
+  dbs: DatabaseBrief[]
+  loadingDbs: boolean
+}
+
+/** 每个目标独立的同步状态（结果/勾选/部署等） */
+interface TargetSyncState {
+  report: DiffItem[] | null
+  reportId: number
+  selectedIds: string[]
+  activeTable: string | null
+  activeItemId: string | null
+  applying: boolean
+  applyResults: ApplyResultItem[] | null
+  applyElapsedMs: number | null
+  error: AppErrorInfo | null
+}
+
+export const emptyTargetState = (): TargetSyncState => ({
+  report: null,
+  reportId: 0,
+  selectedIds: [],
+  activeTable: null,
+  activeItemId: null,
+  applying: false,
+  applyResults: null,
+  applyElapsedMs: null,
+  error: null,
+})
+
+export type CompareMode = 'single' | 'multi'
+
 export type GroupMode = 'action' | 'object'
 
 /** 树表节点（结果页三列树的数据源） */
@@ -38,12 +83,15 @@ export interface DiffNode {
 const GROUP_TITLES: Record<DiffAction, string> = {
   modify: '要修改的对象',
   create: '要创建的对象',
+  rename: '要重命名的对象',
   drop: '要删除的对象',
 }
-const ACTION_ORDER: DiffAction[] = ['modify', 'create', 'drop']
+const ACTION_ORDER: DiffAction[] = ['modify', 'create', 'rename', 'drop']
+const MAX_TARGETS = 8
 
-/** 单表叶子行（建表/删表）或明细行 */
+/** 单表叶子行（建表/删表/重命名）或明细行 */
 function leafFromItem(i: DiffItem): DiffNode {
+  const isRename = i.action === 'rename'
   return {
     key: i.id,
     nodeType: 'item',
@@ -51,18 +99,22 @@ function leafFromItem(i: DiffItem): DiffNode {
     table: i.table,
     action: i.action,
     kind: i.kind,
-    sourceName: i.action === 'drop' ? null : i.name,
-    targetName: i.action === 'create' ? null : i.name,
+    sourceName: isRename ? i.table : i.action === 'drop' ? null : i.name,
+    targetName: isRename ? i.name : i.action === 'create' ? null : i.name,
     sourceDesc: i.sourceDesc,
     targetDesc: i.targetDesc,
     dangerous: i.dangerous,
   }
 }
 
-/** 一张表的差异 → 表行。只有表级项（建/删表）时是叶子；否则父行挂列/索引明细。
- *  表行的 action 固定 modify（能走到这里说明表两端都存在、只是结构有差异）。 */
+/** 一张表的差异 → 表行。只有表级项（建/删/重命名表）时是叶子；否则父行挂列/索引明细。 */
 function tableNode(table: string, items: DiffItem[]): DiffNode {
-  if (items.length === 1 && items[0].id === `tbl:${table}`) {
+  if (
+    items.length === 1 &&
+    (items[0].id === `tbl:${table}` ||
+      items[0].action === 'rename' ||
+      items[0].kind === 'view')
+  ) {
     return leafFromItem(items[0])
   }
   return {
@@ -93,12 +145,10 @@ export function buildDiffTree(items: DiffItem[], mode: GroupMode): DiffNode[] {
   if (mode === 'object') {
     return groupByTable(items).map(([table, its]) => tableNode(table, its))
   }
-  // 按表级操作归类（Navicat 的粒度是「表」，不是「列/索引」）：
-  // 建表 → 要创建；删表 → 要删除；其余（表两端都在、仅列/索引有差异）→ 要修改。
-  // 否则同一张表会因列有增有删而同时出现在多个分组里。
   const buckets: Record<DiffAction, [string, DiffItem[]][]> = {
     modify: [],
     create: [],
+    rename: [],
     drop: [],
   }
   for (const entry of groupByTable(items)) {
@@ -106,8 +156,13 @@ export function buildDiffTree(items: DiffItem[], mode: GroupMode): DiffNode[] {
     const tbl = its.find((i) => i.id === `tbl:${table}`)
     if (tbl) {
       buckets[tbl.action].push(entry)
+    } else if (its[0]?.kind === 'view') {
+      // 视图没有表级项，直接按自身 action 入桶
+      buckets[its[0].action].push(entry)
     } else {
-      buckets.modify.push(entry)
+      // 非表级差异（列/索引）默认归入 modify；rename 是特例：表级 rename 没有 tbl: 前缀
+      const action = its[0]?.action === 'rename' ? 'rename' : 'modify'
+      buckets[action].push(entry)
     }
   }
   const groups: DiffNode[] = []
@@ -142,17 +197,20 @@ export function collectItemIds(nodes: DiffNode[]): string[] {
 export function groupByAction(items: DiffItem[]): {
   modify: DiffItem[]
   create: DiffItem[]
+  rename: DiffItem[]
   drop: DiffItem[]
 } {
   const modify: DiffItem[] = []
   const create: DiffItem[] = []
+  const rename: DiffItem[] = []
   const drop: DiffItem[] = []
   for (const i of items) {
     if (i.action === 'modify') modify.push(i)
     else if (i.action === 'create') create.push(i)
+    else if (i.action === 'rename') rename.push(i)
     else drop.push(i)
   }
-  return { modify, create, drop }
+  return { modify, create, rename, drop }
 }
 
 /** 默认勾选：非破坏性项；DROP 类留给用户手动勾 */
@@ -160,31 +218,98 @@ function defaultSelected(items: DiffItem[]): string[] {
   return items.filter((i) => !i.dangerous).map((i) => i.id)
 }
 
+/** 把当前扁平工作态保存到指定目标 */
+function stashCurrent(s: CompareState, key: string | null): Record<string, TargetSyncState> {
+  if (!key || s.mode !== 'multi') return s.targetStates
+  return {
+    ...s.targetStates,
+    [key]: {
+      report: s.report,
+      reportId: s.reportId,
+      selectedIds: s.selectedIds,
+      activeTable: s.activeTable,
+      activeItemId: s.activeItemId,
+      applying: s.applying,
+      applyResults: s.applyResults,
+      applyElapsedMs: s.applyElapsedMs,
+      error: null,
+    },
+  }
+}
+
+/** 从指定目标恢复扁平工作态 */
+function loadCurrent(s: CompareState, key: string | null): Partial<CompareState> {
+  if (!key || s.mode !== 'multi') {
+    return {
+      report: null,
+      reportId: 0,
+      selectedIds: [],
+      activeTable: null,
+      activeItemId: null,
+      applying: false,
+      applyResults: null,
+      applyElapsedMs: null,
+    }
+  }
+  const st = s.targetStates[key] ?? emptyTargetState()
+  return {
+    report: st.report,
+    reportId: st.reportId,
+    selectedIds: st.selectedIds,
+    activeTable: st.activeTable,
+    activeItemId: st.activeItemId,
+    applying: st.applying,
+    applyResults: st.applyResults,
+    applyElapsedMs: st.applyElapsedMs,
+  }
+}
+
+/** 多目标下是否有任意目标正在部署 */
+function anyApplying(targets: MultiTarget[], states: Record<string, TargetSyncState>): boolean {
+  return targets.some((t) => states[t.key]?.applying)
+}
+
 interface CompareState {
   modalOpen: boolean
   step: CompareStep
+  mode: CompareMode
   /** 端点选择（关闭弹窗时保留，下次打开沿用上次的选择） */
   source: CompareEndpoint
+  /** 单目标模式的目标端点 */
   target: CompareEndpoint
+  /** 多目标模式的目标列表 */
+  targets: MultiTarget[]
+  /** 当前多目标模式下激活的目标 key */
+  activeTargetKey: string | null
+  /** 多目标模式下每个目标的状态仓库 */
+  targetStates: Record<string, TargetSyncState>
   sourceDbs: DatabaseBrief[]
   targetDbs: DatabaseBrief[]
   loadingSourceDbs: boolean
   loadingTargetDbs: boolean
+  /** 同步范围：true = 全部表；false = 指定表 */
+  scopeAll: boolean
+  /** 指定同步的表名（scopeAll=false 时有效） */
+  sourceTables: string[]
+  /** 源库表列表（供选择） */
+  sourceTableList: TableBrief[]
+  loadingSourceTables: boolean
+  /** 对比对象选项：表永远对比；索引默认；视图等默认不对比 */
+  compareOptions: CompareOptions
   report: DiffItem[] | null
   /** 每次成功对比 +1：结果页 Table 的 key，强制重置展开/勾选视觉态 */
   reportId: number
   selectedIds: string[]
-  /** 当前选中的表名（选中表行时设置，用于部署脚本按表展示） */
+  /** 当前选中的表名 */
   activeTable: string | null
-  /** 当前选中的差异项 id（选中明细行时设置） */
+  /** 当前选中的差异项 id */
   activeItemId: string | null
   groupMode: GroupMode
   comparing: boolean
-  /** 对比进度阶段（后端事件）：connect/fetch_source/fetch_target/diff */
+  /** 对比进度阶段（后端事件） */
   comparePhase: string | null
   applying: boolean
   applyResults: ApplyResultItem[] | null
-  /** 一次执行的起止（耗时统计） */
   applyElapsedMs: number | null
   /**
    * 对比请求的代际号。关闭弹窗、改端点、取消、发起新对比都会使其 +1；
@@ -193,7 +318,7 @@ interface CompareState {
   runSeq: number
 
   openModal: () => void
-  /** 重拉两端已选连接的库列表（保留已选数据库） */
+  /** 重拉两端/多目标已选连接的库列表（保留已选数据库） */
   refreshEndpointDbs: () => Promise<void>
   closeModal: () => void
   setSourceConn: (connectionId: string) => Promise<void>
@@ -201,31 +326,48 @@ interface CompareState {
   setTargetConn: (connectionId: string) => Promise<void>
   setTargetDb: (database: string) => void
   swap: () => void
+  setMode: (mode: CompareMode) => void
+  addTarget: () => void
+  removeTarget: (key: string) => void
+  setTargetConnMulti: (key: string, connectionId: string) => Promise<void>
+  setTargetDbMulti: (key: string, database: string) => void
+  setScopeAll: (all: boolean) => void
+  setSourceTables: (tables: string[]) => void
+  setCompareOption: (key: keyof CompareOptions, value: boolean) => void
+  loadSourceTables: () => Promise<void>
   runCompare: () => Promise<void>
+  runCompareMulti: () => Promise<void>
   cancelCompare: () => void
   setGroupMode: (mode: GroupMode) => void
   toggle: (id: string) => void
-  /** 勾选/取消一组差异项（树表勾选级联用） */
   setItemsChecked: (ids: string[], checked: boolean) => void
-  /** 选中某行：表行只设 table，明细行设 table + itemId，清除传 (null, null) */
   setActive: (table: string | null, itemId: string | null) => void
+  setActiveTarget: (key: string) => void
   backToSelect: () => void
   gotoDeploy: () => void
   backToDiff: () => void
   deploy: () => Promise<void>
-  /** 左树断开连接后调用：清掉引用已断开连接的端点选择 */
   syncConnected: (connectedIds: string[]) => void
 }
 
 export const useCompareStore = create<CompareState>((set, get) => ({
   modalOpen: false,
   step: 'select',
+  mode: 'single',
   source: { ...EMPTY_ENDPOINT },
   target: { ...EMPTY_ENDPOINT },
+  targets: [],
+  activeTargetKey: null,
+  targetStates: {},
   sourceDbs: [],
   targetDbs: [],
   loadingSourceDbs: false,
   loadingTargetDbs: false,
+  scopeAll: true,
+  sourceTables: [],
+  sourceTableList: [],
+  loadingSourceTables: false,
+  compareOptions: { compareIndexes: true, compareViews: false },
   report: null,
   reportId: 0,
   selectedIds: [],
@@ -241,29 +383,73 @@ export const useCompareStore = create<CompareState>((set, get) => ({
 
   openModal: () => {
     set({ modalOpen: true })
-    // 打开时重拉两端已选连接的库列表（外面可能新建了库），保留已选数据库
+    const { source } = get()
+    if (source.connectionId && source.database) {
+      void get().loadSourceTables()
+    }
     void get().refreshEndpointDbs()
   },
 
   refreshEndpointDbs: async () => {
-    const { source, target } = get()
-    const pull = async (ep: CompareEndpoint, isSource: boolean) => {
-      if (!ep.connectionId) return
-      set(isSource ? { loadingSourceDbs: true } : { loadingTargetDbs: true })
+    const { source, target, mode, targets } = get()
+    const pullSource = async () => {
+      if (!source.connectionId) return
+      set({ loadingSourceDbs: true })
       try {
-        const dbs = await api.listDatabases(ep.connectionId)
-        set(isSource ? { sourceDbs: dbs, loadingSourceDbs: false } : { targetDbs: dbs, loadingTargetDbs: false })
+        const dbs = await api.listDatabases(source.connectionId)
+        set({ sourceDbs: dbs, loadingSourceDbs: false })
       } catch {
-        set(isSource ? { loadingSourceDbs: false } : { loadingTargetDbs: false })
+        set({ loadingSourceDbs: false })
       }
     }
-    await Promise.allSettled([pull(source, true), pull(target, false)])
+
+    if (mode === 'single') {
+      const pullTarget = async () => {
+        if (!target.connectionId) return
+        set({ loadingTargetDbs: true })
+        try {
+          const dbs = await api.listDatabases(target.connectionId)
+          set({ targetDbs: dbs, loadingTargetDbs: false })
+        } catch {
+          set({ loadingTargetDbs: false })
+        }
+      }
+      await Promise.allSettled([pullSource(), pullTarget()])
+      return
+    }
+
+    // 多目标模式：逐个拉目标库列表
+    await pullSource()
+    await Promise.allSettled(
+      targets.map(async (t) => {
+        if (!t.connectionId) return
+        set((s) => ({
+          targets: s.targets.map((x) =>
+            x.key === t.key ? { ...x, loadingDbs: true } : x,
+          ),
+        }))
+        try {
+          const dbs = await api.listDatabases(t.connectionId)
+          set((s) => ({
+            targets: s.targets.map((x) =>
+              x.key === t.key ? { ...x, dbs, loadingDbs: false } : x,
+            ),
+          }))
+        } catch {
+          set((s) => ({
+            targets: s.targets.map((x) =>
+              x.key === t.key ? { ...x, loadingDbs: false } : x,
+            ),
+          }))
+        }
+      }),
+    )
   },
 
   closeModal: () => {
-    // 部署执行进行中禁止关窗（Modal 的 X 与底部按钮都走这里，统一把守）
-    if (get().applying) return
-    // runSeq +1：进行中的对比响应落地时会发现已过期，不再写回状态
+    // 任意目标正在执行禁止关窗
+    const { mode, targets, targetStates, applying } = get()
+    if (mode === 'multi' ? anyApplying(targets, targetStates) : applying) return
     set((s) => ({
       modalOpen: false,
       runSeq: s.runSeq + 1,
@@ -276,6 +462,8 @@ export const useCompareStore = create<CompareState>((set, get) => ({
       applyElapsedMs: null,
       comparing: false,
       comparePhase: null,
+      targetStates: {},
+      activeTargetKey: null,
     }))
   },
 
@@ -283,6 +471,8 @@ export const useCompareStore = create<CompareState>((set, get) => ({
     set((s) => ({
       source: { connectionId, database: null },
       sourceDbs: [],
+      sourceTableList: [],
+      sourceTables: [],
       loadingSourceDbs: true,
       runSeq: s.runSeq + 1,
     }))
@@ -294,8 +484,15 @@ export const useCompareStore = create<CompareState>((set, get) => ({
       throw e
     }
   },
-  setSourceDb: (database) =>
-    set((s) => ({ source: { ...s.source, database }, runSeq: s.runSeq + 1 })),
+
+  setSourceDb: (database) => {
+    set((s) => ({
+      source: { ...s.source, database },
+      sourceTables: [],
+      runSeq: s.runSeq + 1,
+    }))
+    void get().loadSourceTables()
+  },
 
   setTargetConn: async (connectionId) => {
     set((s) => ({
@@ -312,6 +509,7 @@ export const useCompareStore = create<CompareState>((set, get) => ({
       throw e
     }
   },
+
   setTargetDb: (database) =>
     set((s) => ({ target: { ...s.target, database }, runSeq: s.runSeq + 1 })),
 
@@ -326,11 +524,162 @@ export const useCompareStore = create<CompareState>((set, get) => ({
       step: 'select',
       applyResults: null,
       runSeq: s.runSeq + 1,
+      targets: [],
+      targetStates: {},
+      activeTargetKey: null,
     }))
   },
 
+  setMode: (mode) => {
+    const { mode: oldMode, target, targets, activeTargetKey } = get()
+    if (mode === oldMode) return
+
+    if (mode === 'multi') {
+      // 单目标 → 多目标：把现有目标端点作为第一个目标
+      const firstKey = crypto.randomUUID()
+      set((s) => ({
+        mode,
+        targets: [
+          {
+            key: firstKey,
+            connectionId: target.connectionId,
+            database: target.database,
+            dbs: s.targetDbs,
+            loadingDbs: false,
+          },
+        ],
+        activeTargetKey: firstKey,
+        targetStates: {
+          [firstKey]: emptyTargetState(),
+        },
+        target: { ...EMPTY_ENDPOINT },
+        targetDbs: [],
+        report: null,
+        reportId: 0,
+        selectedIds: [],
+        activeTable: null,
+        activeItemId: null,
+        applyResults: null,
+        applyElapsedMs: null,
+        runSeq: s.runSeq + 1,
+      }))
+      return
+    }
+
+    // 多目标 → 单目标：把当前激活目标的端点作为单目标
+    const active = activeTargetKey
+      ? targets.find((t) => t.key === activeTargetKey)
+      : targets[0]
+    set((s) => ({
+      mode,
+      target: active
+        ? { connectionId: active.connectionId, database: active.database }
+        : { ...EMPTY_ENDPOINT },
+      targetDbs: active?.dbs ?? [],
+      targets: [],
+      activeTargetKey: null,
+      targetStates: {},
+      report: null,
+      reportId: 0,
+      selectedIds: [],
+      activeTable: null,
+      activeItemId: null,
+      applyResults: null,
+      applyElapsedMs: null,
+      runSeq: s.runSeq + 1,
+    }))
+  },
+
+  addTarget: () => {
+    const { targets } = get()
+    if (targets.length >= MAX_TARGETS) return
+    const key = crypto.randomUUID()
+    set((s) => ({
+      targets: [
+        ...s.targets,
+        { key, connectionId: null, database: null, dbs: [], loadingDbs: false },
+      ],
+      targetStates: { ...s.targetStates, [key]: emptyTargetState() },
+      activeTargetKey: s.activeTargetKey ?? key,
+    }))
+  },
+
+  removeTarget: (key) => {
+    const { targets, activeTargetKey, targetStates } = get()
+    const nextTargets = targets.filter((t) => t.key !== key)
+    const nextStates = { ...targetStates }
+    delete nextStates[key]
+    let nextActive = activeTargetKey
+    if (activeTargetKey === key) {
+      nextActive = nextTargets[0]?.key ?? null
+    }
+    const patch: Partial<CompareState> = {
+      targets: nextTargets,
+      targetStates: nextStates,
+      activeTargetKey: nextActive,
+    }
+    if (nextActive !== activeTargetKey) {
+      Object.assign(patch, loadCurrent({ ...get(), targets: nextTargets, targetStates: nextStates, activeTargetKey: nextActive } as CompareState, nextActive))
+    }
+    set(patch)
+  },
+
+  setTargetConnMulti: async (key, connectionId) => {
+    set((s) => ({
+      targets: s.targets.map((t) =>
+        t.key === key
+          ? { ...t, connectionId, database: null, dbs: [], loadingDbs: true }
+          : t,
+      ),
+      runSeq: s.runSeq + 1,
+    }))
+    try {
+      const dbs = await api.listDatabases(connectionId)
+      set((s) => ({
+        targets: s.targets.map((t) =>
+          t.key === key ? { ...t, dbs, loadingDbs: false } : t,
+        ),
+      }))
+    } catch {
+      set((s) => ({
+        targets: s.targets.map((t) =>
+          t.key === key ? { ...t, loadingDbs: false } : t,
+        ),
+      }))
+    }
+  },
+
+  setTargetDbMulti: (key, database) =>
+    set((s) => ({
+      targets: s.targets.map((t) =>
+        t.key === key ? { ...t, database } : t,
+      ),
+      runSeq: s.runSeq + 1,
+    })),
+
+  setScopeAll: (all) => set({ scopeAll: all, sourceTables: all ? [] : get().sourceTables }),
+
+  setSourceTables: (tables) => set({ sourceTables: tables }),
+
+  setCompareOption: (key, value) =>
+    set((s) => ({
+      compareOptions: { ...s.compareOptions, [key]: value },
+    })),
+
+  loadSourceTables: async () => {
+    const { source } = get()
+    if (!source.connectionId || !source.database) return
+    set({ loadingSourceTables: true })
+    try {
+      const tables = await api.listTables(source.connectionId, source.database)
+      set({ sourceTableList: tables, loadingSourceTables: false })
+    } catch {
+      set({ sourceTableList: [], loadingSourceTables: false })
+    }
+  },
+
   runCompare: async () => {
-    const { source, target } = get()
+    const { source, target, scopeAll, sourceTables, compareOptions } = get()
     if (!source.connectionId || !source.database || !target.connectionId || !target.database) return
     const seq = get().runSeq + 1
     set({
@@ -342,25 +691,24 @@ export const useCompareStore = create<CompareState>((set, get) => ({
     })
     let unlisten: (() => void) | undefined
     try {
-      // 监听后端阶段事件驱动进度层（事件可能因环境缺失失败，不阻塞主流程）
       unlisten = await api
         .onCompareProgress((phase) => {
           if (get().runSeq === seq) set({ comparePhase: phase })
         })
         .catch(() => undefined)
+      const tables = scopeAll ? undefined : sourceTables
       const items = await api.compareSchema(
         source.connectionId,
         source.database,
         target.connectionId,
         target.database,
+        tables,
+        compareOptions,
       )
-      // 表选项（ENGINE/COMMENT 差异，id 前缀 tblopt:）默认不展示、不参与同步
       const visible = items.filter((i) => !i.id.startsWith('tblopt:'))
-      // 表级项在前、同表按 id 排序
       visible.sort((a, b) =>
         a.table === b.table ? a.id.localeCompare(b.id) : a.table.localeCompare(b.table, 'zh'),
       )
-      // 等待期间弹窗被关闭 / 端点被改 / 被取消 / 发起了新对比 → 序号已过期，丢弃结果
       if (get().runSeq !== seq) return
       set((s) => ({
         report: visible,
@@ -376,7 +724,88 @@ export const useCompareStore = create<CompareState>((set, get) => ({
     }
   },
 
-  /** 进度层上的取消：放弃等待本次结果（后端查询只读，让其自然跑完即可） */
+  runCompareMulti: async () => {
+    const { source, targets, scopeAll, sourceTables, activeTargetKey, compareOptions } = get()
+    if (!source.connectionId || !source.database) return
+    const readyTargets = targets.filter((t) => t.connectionId && t.database)
+    if (readyTargets.length === 0) return
+    const seq = get().runSeq + 1
+    set({
+      runSeq: seq,
+      comparing: true,
+      comparePhase: 'connect',
+      applyResults: null,
+      activeItemId: null,
+      targetStates: {},
+    })
+    let unlisten: (() => void) | undefined
+    try {
+      unlisten = await api
+        .onCompareMultiProgress((e) => {
+          if (get().runSeq === seq) {
+            set({ comparePhase: `target ${e.index + 1}/${e.total}: ${e.database} (${e.phase})` })
+          }
+        })
+        .catch(() => undefined)
+      const specs: CompareTargetSpec[] = readyTargets.map((t) => ({
+        key: t.key,
+        connectionId: t.connectionId!,
+        database: t.database!,
+      }))
+      const reports = await api.compareSchemaMulti(
+        source.connectionId,
+        source.database,
+        scopeAll ? null : sourceTables,
+        specs,
+        compareOptions,
+      )
+      if (get().runSeq !== seq) return
+
+      // 分发结果到各目标状态（按 key 匹配，避免同连接+同库的重复目标冲突）
+      const nextStates: Record<string, TargetSyncState> = {}
+      for (const r of reports) {
+        const t = readyTargets.find((x) => x.key === r.key)
+        if (!t) continue
+        const visible = r.items.filter((i) => !i.id.startsWith('tblopt:'))
+        visible.sort((a, b) =>
+          a.table === b.table ? a.id.localeCompare(b.id) : a.table.localeCompare(b.table, 'zh'),
+        )
+        nextStates[t.key] = {
+          report: visible,
+          reportId: 1,
+          selectedIds: defaultSelected(visible),
+          activeTable: null,
+          activeItemId: null,
+          applying: false,
+          applyResults: null,
+          applyElapsedMs: null,
+          error: r.error,
+        }
+      }
+
+      const firstKey = activeTargetKey && nextStates[activeTargetKey]
+        ? activeTargetKey
+        : readyTargets[0]?.key ?? null
+      const st = firstKey ? nextStates[firstKey] ?? emptyTargetState() : emptyTargetState()
+      set(() => ({
+        targetStates: nextStates,
+        activeTargetKey: firstKey,
+        report: st.report,
+        reportId: st.reportId,
+        selectedIds: st.selectedIds,
+        activeTable: st.activeTable,
+        activeItemId: st.activeItemId,
+        applying: st.applying,
+        applyResults: st.applyResults,
+        applyElapsedMs: st.applyElapsedMs,
+        step: 'diff',
+      }))
+    } finally {
+      unlisten?.()
+      if (get().runSeq === seq) set({ comparing: false, comparePhase: null })
+    }
+  },
+
   cancelCompare: () =>
     set((s) => ({ runSeq: s.runSeq + 1, comparing: false, comparePhase: null })),
 
@@ -401,50 +830,115 @@ export const useCompareStore = create<CompareState>((set, get) => ({
 
   setActive: (table, itemId) => set({ activeTable: table, activeItemId: itemId }),
 
+  setActiveTarget: (key) => {
+    const { activeTargetKey } = get()
+    if (key === activeTargetKey) return
+    set((s) => {
+      const stashed = stashCurrent(s, activeTargetKey)
+      const loaded = loadCurrent({ ...s, targetStates: stashed, activeTargetKey: key } as CompareState, key)
+      return {
+        ...loaded,
+        targetStates: stashed,
+        activeTargetKey: key,
+        runSeq: s.runSeq + 1,
+      }
+    })
+  },
+
   backToSelect: () => {
-    if (get().applying) return
-    // 保留端点选择与 report，仅回到选择页；再点「对比」会用当前端点重跑
+    const { mode, targets, targetStates, applying } = get()
+    if (mode === 'multi' ? anyApplying(targets, targetStates) : applying) return
     set({ step: 'select' })
   },
 
   gotoDeploy: () => {
-    if (get().comparing || get().selectedIds.length === 0) return
+    const { comparing, selectedIds } = get()
+    if (comparing || selectedIds.length === 0) return
     set({ step: 'deploy' })
   },
+
   backToDiff: () => {
-    if (get().applying) return
+    const { mode, targets, targetStates, applying } = get()
+    if (mode === 'multi' ? anyApplying(targets, targetStates) : applying) return
     set({ step: 'diff', applyResults: null, applyElapsedMs: null })
   },
 
   deploy: async () => {
-    const { target, report, selectedIds, applying } = get()
-    if (applying || !target.connectionId || !report) return
+    const {
+      mode,
+      target,
+      targets,
+      activeTargetKey,
+      report,
+      selectedIds,
+      applying,
+    } = get()
+
+    let targetConnId: string | null = null
+    let targetKey: string | null = null
+    if (mode === 'single') {
+      targetConnId = target.connectionId
+      targetKey = null
+    } else {
+      const t = activeTargetKey ? targets.find((x) => x.key === activeTargetKey) : null
+      targetConnId = t?.connectionId ?? null
+      targetKey = t?.key ?? null
+    }
+    if (applying || !targetConnId || !report) return
+
     const sqls = report
       .filter((i) => selectedIds.includes(i.id))
       .map((i) => i.sql)
       .filter((s): s is string => !!s)
     if (sqls.length === 0) return
+
     const startedAt = Date.now()
     set({ applying: true, applyResults: null, applyElapsedMs: null })
     try {
-      const results = await api.applySync(target.connectionId, sqls)
+      const results = await api.applySync(targetConnId, sqls)
       set({ applyResults: results, applyElapsedMs: Date.now() - startedAt })
     } finally {
       set({ applying: false })
+      // 多目标模式下把当前扁平工作态的 applyResults/applying 回写到目标状态
+      if (mode === 'multi' && targetKey) {
+        set((s) => ({
+          targetStates: stashCurrent(
+            { ...s, applying: false } as CompareState,
+            targetKey,
+          ),
+        }))
+      }
     }
   },
 
   syncConnected: (connectedIds) => {
-    const { source, target } = get()
+    const { mode, source, target, targets } = get()
     const alive = new Set(connectedIds)
     const patch: Partial<CompareState> = {}
     if (source.connectionId && !alive.has(source.connectionId)) {
       patch.source = { ...EMPTY_ENDPOINT }
       patch.sourceDbs = []
+      patch.sourceTableList = []
+      patch.sourceTables = []
     }
-    if (target.connectionId && !alive.has(target.connectionId)) {
-      patch.target = { ...EMPTY_ENDPOINT }
-      patch.targetDbs = []
+    if (mode === 'single') {
+      if (target.connectionId && !alive.has(target.connectionId)) {
+        patch.target = { ...EMPTY_ENDPOINT }
+        patch.targetDbs = []
+      }
+    } else {
+      patch.targets = targets
+        .filter((t) => !t.connectionId || alive.has(t.connectionId))
+        .map((t) => ({ ...t, database: alive.has(t.connectionId ?? '') ? t.database : null }))
+      // 如果当前激活目标被移除，切到第一个
+      const { activeTargetKey } = get()
+      if (
+        activeTargetKey &&
+        !patch.targets!.some((t) => t.key === activeTargetKey)
+      ) {
+        patch.activeTargetKey = patch.targets![0]?.key ?? null
+        Object.assign(patch, loadCurrent({ ...get(), ...patch } as CompareState, patch.activeTargetKey ?? null))
+      }
     }
     if (Object.keys(patch).length > 0) set(patch)
   },

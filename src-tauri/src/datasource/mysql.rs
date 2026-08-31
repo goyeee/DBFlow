@@ -8,6 +8,7 @@ use crate::error::{AppError, AppResult};
 
 use super::{
     ColumnBrief, DatabaseBrief, LiveConnection, SchemaSnapshot, TableBrief,
+    ViewDef,
 };
 use crate::tunnel::TunnelLease;
 
@@ -215,50 +216,75 @@ impl LiveConnection for MySqlLive {
             .collect())
     }
 
-    async fn snapshot_schema(&self, database: &str) -> AppResult<SchemaSnapshot> {
+    async fn snapshot_tables(
+        &self,
+        database: &str,
+        only_tables: Option<&[String]>,
+    ) -> AppResult<SchemaSnapshot> {
         use std::collections::BTreeMap;
 
         use super::{normalize_default, normalize_extra, ColumnDef, IndexDef, SchemaSnapshot, TableDef};
 
+        // 防御性：空过滤视为无过滤
+        let only_tables = only_tables.filter(|ts| !ts.is_empty());
+
         // 表
-        let table_rows = sqlx::query(
-            r#"
-            SELECT TABLE_NAME, ENGINE, TABLE_COLLATION, TABLE_COMMENT
-            FROM information_schema.TABLES
-            WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'
-            ORDER BY TABLE_NAME
-            "#,
-        )
-        .bind(database)
-        .fetch_all(&self.pool)
-        .await?;
+        let mut table_qb = sqlx::QueryBuilder::new(
+            "SELECT TABLE_NAME, ENGINE, TABLE_COLLATION, TABLE_COMMENT \
+             FROM information_schema.TABLES \
+             WHERE TABLE_SCHEMA = ",
+        );
+        table_qb.push_bind(database);
+        table_qb.push(" AND TABLE_TYPE = 'BASE TABLE'");
+        if let Some(ts) = only_tables {
+            table_qb.push(" AND TABLE_NAME IN (");
+            let mut sep = table_qb.separated(", ");
+            for t in ts {
+                sep.push_bind(t);
+            }
+            table_qb.push(")");
+        }
+        table_qb.push(" ORDER BY TABLE_NAME");
+        let table_rows = table_qb.build().fetch_all(&self.pool).await?;
 
         // 列
-        let column_rows = sqlx::query(
-            r#"
-            SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE,
-                   COLUMN_DEFAULT, EXTRA, COLUMN_COMMENT, ORDINAL_POSITION
-            FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = ?
-            ORDER BY TABLE_NAME, ORDINAL_POSITION
-            "#,
-        )
-        .bind(database)
-        .fetch_all(&self.pool)
-        .await?;
+        let mut column_qb = sqlx::QueryBuilder::new(
+            "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, \
+                   COLUMN_DEFAULT, EXTRA, COLUMN_COMMENT, ORDINAL_POSITION, \
+                   CHARACTER_SET_NAME, COLLATION_NAME \
+             FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA = ",
+        );
+        column_qb.push_bind(database);
+        if let Some(ts) = only_tables {
+            column_qb.push(" AND TABLE_NAME IN (");
+            let mut sep = column_qb.separated(", ");
+            for t in ts {
+                sep.push_bind(t);
+            }
+            column_qb.push(")");
+        }
+        column_qb.push(" ORDER BY TABLE_NAME, ORDINAL_POSITION");
+        let column_rows = column_qb.build().fetch_all(&self.pool).await?;
 
         // 索引（行粒度 = 索引的一列）
-        let index_rows = sqlx::query(
-            r#"
-            SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME, NON_UNIQUE, INDEX_TYPE
-            FROM information_schema.STATISTICS
-            WHERE TABLE_SCHEMA = ?
-            ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX
-            "#,
-        )
-        .bind(database)
-        .fetch_all(&self.pool)
-        .await?;
+        let mut index_qb = sqlx::QueryBuilder::new(
+            "SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME, NON_UNIQUE, INDEX_TYPE, \
+                   SUB_PART, COLLATION \
+             FROM information_schema.STATISTICS \
+             WHERE TABLE_SCHEMA = ",
+        );
+        index_qb.push_bind(database);
+        if let Some(ts) = only_tables {
+            index_qb.push(" AND TABLE_NAME IN (");
+            let mut sep = index_qb.separated(", ");
+            for t in ts {
+                sep.push_bind(t);
+            }
+            index_qb.push(")");
+        }
+        index_qb.push(" ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX");
+        let index_rows = index_qb.build().fetch_all(&self.pool).await?;
 
         let mut tables: BTreeMap<String, TableDef> = BTreeMap::new();
         for row in table_rows {
@@ -283,9 +309,22 @@ impl LiveConnection for MySqlLive {
             );
         }
 
+        // 列只挂到真实表上（COLUMNS 会包含视图的列，视图为幻影表则跳过）。
+        // ordinal 不信任 try_get 的类型转换（bigint unsigned → i64 在部分版本/驱动
+        // 组合下会失败兜底成 0，导致位置对比下溢 panic）——查询已按
+        // TABLE_NAME, ORDINAL_POSITION 排序，直接用表内行号。
+        let mut ordinal_counters: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
         for row in column_rows {
             let table: String = row.try_get("TABLE_NAME")?;
-            let entry = tables.entry(table).or_default();
+            let Some(entry) = tables.get_mut(&table) else {
+                continue;
+            };
+            let ordinal = {
+                let c = ordinal_counters.entry(table).or_insert(0);
+                *c += 1;
+                *c
+            };
             let name: String = row.try_get("COLUMN_NAME")?;
             entry.columns.push(ColumnDef {
                 name,
@@ -303,11 +342,17 @@ impl LiveConnection for MySqlLive {
                     .ok()
                     .flatten()
                     .filter(|c| !c.is_empty()),
-                ordinal: row
-                    .try_get::<Option<i64>, _>("ORDINAL_POSITION")
+                ordinal,
+                character_set: row
+                    .try_get::<Option<String>, _>("CHARACTER_SET_NAME")
                     .ok()
                     .flatten()
-                    .unwrap_or(0) as u32,
+                    .filter(|c| !c.is_empty()),
+                collation: row
+                    .try_get::<Option<String>, _>("COLLATION_NAME")
+                    .ok()
+                    .flatten()
+                    .filter(|c| !c.is_empty()),
             });
         }
 
@@ -317,10 +362,23 @@ impl LiveConnection for MySqlLive {
             let table: String = row.try_get("TABLE_NAME")?;
             let index_name: String = row.try_get("INDEX_NAME")?;
             let column: String = row.try_get("COLUMN_NAME")?;
+            let sub_part: Option<u32> = row
+                .try_get::<Option<i64>, _>("SUB_PART")
+                .ok()
+                .flatten()
+                .and_then(|v| if v > 0 { Some(v as u32) } else { None });
+            let direction: Option<String> = row
+                .try_get::<Option<String>, _>("COLLATION")
+                .ok()
+                .flatten()
+                .filter(|c| c.eq_ignore_ascii_case("D"))
+                .map(|_| "DESC".to_string());
             let key = (table.clone(), index_name.clone());
             let def = index_seen.entry(key).or_insert_with(|| IndexDef {
                 name: index_name.clone(),
                 columns: Vec::new(),
+                sub_parts: Vec::new(),
+                directions: Vec::new(),
                 unique: row
                     .try_get::<Option<i64>, _>("NON_UNIQUE")
                     .ok()
@@ -334,6 +392,8 @@ impl LiveConnection for MySqlLive {
                     .flatten(),
             });
             def.columns.push(column);
+            def.sub_parts.push(sub_part);
+            def.directions.push(direction);
         }
         for ((table, _), def) in index_seen {
             if let Some(t) = tables.get_mut(&table) {
@@ -341,9 +401,34 @@ impl LiveConnection for MySqlLive {
             }
         }
 
+        // 视图：整库快照时才抓取；按表范围同步时暂不涉及视图，避免误 DROP
+        let mut views: Vec<ViewDef> = Vec::new();
+        if only_tables.is_none() {
+            let view_rows = sqlx::query(
+                "SELECT TABLE_NAME, VIEW_DEFINITION \
+                 FROM information_schema.VIEWS \
+                 WHERE TABLE_SCHEMA = ? \
+                 ORDER BY TABLE_NAME",
+            )
+            .bind(database)
+            .fetch_all(&self.pool)
+            .await?;
+            for row in view_rows {
+                views.push(ViewDef {
+                    name: row.try_get("TABLE_NAME")?,
+                    definition: row
+                        .try_get::<Option<String>, _>("VIEW_DEFINITION")
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default(),
+                });
+            }
+        }
+
         Ok(SchemaSnapshot {
             database: database.to_string(),
             tables: tables.into_values().collect(),
+            views,
         })
     }
 
@@ -427,6 +512,7 @@ mod diag_tests {
             default_database: None,
             has_password: password.is_some(),
             ssh_has_password: false,
+            remember_password: false,
             options: serde_json::from_value(conn["options"].clone()).unwrap_or_default(),
             ssh: None,
             created_at: 0,
@@ -476,6 +562,7 @@ mod e2e_tests {
             default_database: None,
             has_password: true,
             ssh_has_password: false,
+            remember_password: false,
             options: Default::default(),
             ssh: None,
             created_at: 0,

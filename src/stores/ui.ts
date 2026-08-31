@@ -7,6 +7,14 @@ export interface FormTarget {
   defaultGroupId?: string | null
 }
 
+/** 请求左侧导航树定位到某张表（nonce 保证重复点击同一表也触发） */
+export interface RevealTableTarget {
+  connectionId: string
+  database: string
+  table: string
+  nonce: number
+}
+
 interface UiState {
   form: FormTarget | null
   openForm: (target: FormTarget) => void
@@ -18,6 +26,9 @@ interface UiState {
 
   navicatOpen: boolean
   setNavicatOpen: (open: boolean) => void
+
+  revealTable: RevealTableTarget | null
+  revealInTree: (connectionId: string, database: string, table: string) => void
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -31,4 +42,10 @@ export const useUiStore = create<UiState>((set) => ({
 
   navicatOpen: false,
   setNavicatOpen: (open) => set({ navicatOpen: open }),
+
+  revealTable: null,
+  revealInTree: (connectionId, database, table) =>
+    set((s) => ({
+      revealTable: { connectionId, database, table, nonce: (s.revealTable?.nonce ?? 0) + 1 },
+    })),
 }))

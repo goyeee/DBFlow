@@ -1,13 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
+  Badge,
   Button,
+  Checkbox,
   Empty,
   Modal,
   Progress,
+  Segmented,
   Select,
   Spin,
   Tabs,
+  Tooltip,
   message,
 } from 'antd'
 import {
@@ -17,19 +21,22 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   DatabaseOutlined,
+  DeleteOutlined,
+  PlusOutlined,
   RedoOutlined,
   SwapOutlined,
   TableOutlined,
 } from '@ant-design/icons'
-import { useCompareStore, type CompareEndpoint, type CompareStep } from '../../stores/compare'
+import { useCompareStore, type CompareEndpoint, type CompareStep, type MultiTarget } from '../../stores/compare'
 import { useConnectionsStore } from '../../stores/connections'
 import { useSessionStore } from '../../stores/session'
-import type { ConnectionProfile } from '../../api/types'
+import type { ConnectionProfile, DatabaseBrief } from '../../api/types'
 import { errText } from '../connection/ConnectionTree'
+import { COLOR_PRESETS } from '../connection/colors'
 import { DiffTree } from './DiffTree'
 import { SqlView } from './SqlView'
 
-/** 对比进度阶段 → 进度条百分比与文案（对照 Navicat「正在比较数据库…/正在获取表」） */
+/** 对比进度阶段 → 进度条百分比与文案 */
 const PHASE_META: Record<string, { percent: number; text: string }> = {
   connect: { percent: 15, text: '正在连接…' },
   fetch_source: { percent: 40, text: '正在获取表（源端）' },
@@ -37,38 +44,50 @@ const PHASE_META: Record<string, { percent: number; text: string }> = {
   diff: { percent: 90, text: '正在比对对象' },
 }
 
-/** 工具菜单 → 结构同步：选择 → 对比结果 → 部署（参照 Navicat 交互） */
+/** 工具菜单 → 结构同步：选择 → 对比结果 → 部署 */
 export function SyncSchemaModal() {
   const cmp = useCompareStore()
   const connections = useConnectionsStore((s) => s.connections)
   const groups = useConnectionsStore((s) => s.groups)
   const connected = useSessionStore((s) => s.connected)
+  const connect = useSessionStore((s) => s.connect)
 
-  // 只有已建立连接的连接可选（对比需要两端会话）
-  const connectedOptions = useMemo(
+  // 弹窗内可以直接选择所有已保存连接；未连接时自动连接
+  const connectionOptions = useMemo(
     () =>
-      connections
-        .filter((c) => connected[c.id])
-        .map((c) => ({
-          value: c.id,
-          label: (
-            <span>
-              <ApiOutlined style={{ marginRight: 6, color: '#52a86e' }} />
-              {c.name}（{c.host}:{c.port}）
-            </span>
-          ),
-        })),
+      connections.map((c) => ({
+        value: c.id,
+        label: (
+          <span>
+            <ApiOutlined
+              style={{ marginRight: 6, color: connected[c.id] ? '#52a86e' : '#999' }}
+            />
+            {c.name}（{c.host}:{c.port}）
+          </span>
+        ),
+      })),
     [connections, connected],
   )
+
+  /** 选择连接：若尚未建立会话则自动连接，失败时提示并终止 */
+  const ensureConnected = async (connectionId: string): Promise<boolean> => {
+    if (connected[connectionId]) return true
+    return connect(connectionId)
+  }
+
+  const findConn = (id: string | null): ConnectionProfile | undefined =>
+    connections.find((c) => c.id === id)
+  const groupNameOf = (p: ConnectionProfile | undefined): string => {
+    if (!p) return '--'
+    if (!p.groupId) return '未分组'
+    return groups.find((g) => g.id === p.groupId)?.name ?? '未分组'
+  }
 
   const selected = useMemo(
     () => (cmp.report ?? []).filter((i) => cmp.selectedIds.includes(i.id)),
     [cmp.report, cmp.selectedIds],
   )
-  // DDL 比较展示规则：
-  //  - 选中表行 → 该表完整 DDL
-  //  - 选中「表级叶子」（tbl: 建表/删表）→ 该 item 的 DDL（一侧为「不存在」）
-  //  - 选中字段/索引明细 → 不展示 DDL 比较（只看部署脚本）
+
   const activeItem = useMemo(() => {
     if (!cmp.activeTable) return null
     if (cmp.activeItemId) {
@@ -78,26 +97,23 @@ export function SyncSchemaModal() {
     return (cmp.report ?? []).find((i) => i.table === cmp.activeTable) ?? null
   }, [cmp.report, cmp.activeItemId, cmp.activeTable])
 
-  // 左树里断开（或删除）连接后，清掉引用该连接的端点选择（否则下拉显示裸 id、对比必失败）
   useEffect(() => {
     useCompareStore.getState().syncConnected(Object.keys(connected))
   }, [connected, connections])
 
-  // ── 对比结果页：上（差异列表）下（DDL/部署脚本）分隔条，可拖拽调整高度 ──
   const stepBodyRef = useRef<HTMLDivElement>(null)
   const [bottomHeight, setBottomHeight] = useState(300)
   const dragRef = useRef<{ startY: number; startH: number } | null>(null)
   const initializedRef = useRef(false)
 
-  // 首次对比出结果时，把底部区域设为可用高度的一半（上下各占一半）
   useEffect(() => {
     if (cmp.step === 'diff' && cmp.report && cmp.report.length > 0 && !initializedRef.current) {
       initializedRef.current = true
       const el = stepBodyRef.current
       if (el) {
-        // 可用高度 ≈ 容器总高 - 工具栏(~30) - 分隔条(~14) - 底栏(~44)
         const available = el.clientHeight - 88
-        setBottomHeight(Math.max(120, Math.floor(available / 2)))
+        // 默认底部 DDL/脚本区占 1/3，给差异树留更多空间
+        setBottomHeight(Math.max(120, Math.floor(available / 3)))
       }
     }
   }, [cmp.step, cmp.report])
@@ -109,7 +125,7 @@ export function SyncSchemaModal() {
       const drag = dragRef.current
       if (!drag) return
       const total = stepBodyRef.current?.clientHeight ?? 600
-      const delta = drag.startY - ev.clientY // 向上拖 delta>0 → 底部区域变大
+      const delta = drag.startY - ev.clientY
       const maxH = Math.floor(total * 0.75)
       const minH = 100
       setBottomHeight(Math.min(maxH, Math.max(minH, drag.startH + delta)))
@@ -127,19 +143,21 @@ export function SyncSchemaModal() {
 
   if (!cmp.modalOpen) return null
 
-  const findConn = (id: string | null): ConnectionProfile | undefined =>
-    connections.find((c) => c.id === id)
-  const groupNameOf = (p: ConnectionProfile | undefined): string => {
-    if (!p) return '--'
-    if (!p.groupId) return '未分组'
-    return groups.find((g) => g.id === p.groupId)?.name ?? '未分组'
-  }
+  const singleReady =
+    cmp.source.connectionId &&
+    cmp.source.database &&
+    cmp.target.connectionId &&
+    cmp.target.database
 
-  const bothReady =
-    cmp.source.connectionId && cmp.source.database && cmp.target.connectionId && cmp.target.database
+  const multiReadyTargets = cmp.targets.filter((t) => t.connectionId && t.database)
+  const multiReady =
+    cmp.source.connectionId && cmp.source.database && multiReadyTargets.length > 0
+
+  const scopeReady = cmp.scopeAll || cmp.sourceTables.length > 0
 
   const doCompare = () => {
-    cmp.runCompare().catch((e) => message.error(errText(e)))
+    const fn = cmp.mode === 'single' ? cmp.runCompare : cmp.runCompareMulti
+    fn().catch((e) => message.error(errText(e)))
   }
 
   const STEP_TITLES: Record<CompareStep, string> = {
@@ -148,7 +166,6 @@ export function SyncSchemaModal() {
     deploy: '部署',
   }
 
-  /** 顶部居中摘要：源连接/库 → 目标连接/库（图 7/8/9 头部） */
   const summarySide = (ep: CompareEndpoint, color: string, alignRight: boolean) => {
     const conn = findConn(ep.connectionId)
     return (
@@ -161,22 +178,40 @@ export function SyncSchemaModal() {
       </>
     )
   }
-  const summaryHeader = (
-    <div className="cmp-summary">
-      {summarySide(cmp.source, '#52a86e', true)}
-      <ArrowRightOutlined className="cmp-summary-arrow" />
-      {summarySide(cmp.target, '#4a90d9', false)}
-    </div>
+
+  const summaryHeader =
+    cmp.mode === 'single' ? (
+      <div className="cmp-summary">
+        {summarySide(cmp.source, '#52a86e', true)}
+        <ArrowRightOutlined className="cmp-summary-arrow" />
+        {summarySide(cmp.target, '#4a90d9', false)}
+      </div>
+    ) : (
+      <div className="cmp-summary">
+        {summarySide(cmp.source, '#52a86e', true)}
+        <ArrowRightOutlined className="cmp-summary-arrow" />
+        <div className="cmp-summary-text">
+          <div className="cmp-summary-conn">{multiReadyTargets.length} 个目标</div>
+          <div className="cmp-summary-db">
+            {multiReadyTargets
+              .map((t) => {
+                const c = findConn(t.connectionId)
+                return c ? `${c.name} / ${t.database}` : t.database
+              })
+              .join('、') || '--'}
+          </div>
+        </div>
+        <DatabaseOutlined className="cmp-summary-icon" style={{ color: '#4a90d9' }} />
+      </div>
+    )
+
+  const stepTitle = cmp.step === 'select' && (
+    <div className="cmp-step-title">{STEP_TITLES[cmp.step]}</div>
   )
 
-  const stepTitle = <div className="cmp-step-title">{STEP_TITLES[cmp.step]}</div>
-
-  /** 端点选择面板：源/目标各一列，下方挂信息块（图 9） */
-  const endpointPanel = (role: 'source' | 'target') => {
-    const isSource = role === 'source'
-    const ep = isSource ? cmp.source : cmp.target
-    const dbs = isSource ? cmp.sourceDbs : cmp.targetDbs
-    const loading = isSource ? cmp.loadingSourceDbs : cmp.loadingTargetDbs
+  /** 源端面板：连接 + 数据库 + 同步范围 */
+  const sourcePanel = () => {
+    const ep = cmp.source
     const profile = findConn(ep.connectionId)
     const infoRows: [string, string][] = [
       ['分组', groupNameOf(profile)],
@@ -188,17 +223,18 @@ export function SyncSchemaModal() {
     ]
     return (
       <div className="cmp-pane">
-        <div className="cmp-pane-title">{isSource ? '源' : '目标'}</div>
+        <div className="cmp-pane-title">源</div>
         <div className="cmp-field">
           <div className="cmp-field-label">连接</div>
           <Select
             style={{ width: '100%' }}
-            placeholder={connectedOptions.length === 0 ? '请先在左侧连接一个数据库' : '选择连接'}
+            placeholder={connectionOptions.length === 0 ? '请先创建一个连接' : '选择连接'}
             value={ep.connectionId ?? undefined}
-            options={connectedOptions}
-            onChange={(v) => {
-              const fn = isSource ? cmp.setSourceConn : cmp.setTargetConn
-              fn(v).catch((e) => message.error(errText(e)))
+            options={connectionOptions}
+            onChange={async (v) => {
+              const ok = await ensureConnected(v)
+              if (!ok) return
+              cmp.setSourceConn(v).catch((e) => message.error(errText(e)))
             }}
           />
         </div>
@@ -209,8 +245,8 @@ export function SyncSchemaModal() {
             placeholder="选择数据库"
             value={ep.database ?? undefined}
             disabled={!ep.connectionId}
-            loading={loading}
-            options={dbs.map((d) => ({
+            loading={cmp.loadingSourceDbs}
+            options={cmp.sourceDbs.map((d) => ({
               value: d.name,
               label: (
                 <span>
@@ -219,7 +255,120 @@ export function SyncSchemaModal() {
                 </span>
               ),
             }))}
-            onChange={(v) => (isSource ? cmp.setSourceDb(v) : cmp.setTargetDb(v))}
+            onChange={(v) => cmp.setSourceDb(v)}
+          />
+        </div>
+        <div className="cmp-field">
+          <div className="cmp-field-label">同步范围</div>
+          <Segmented
+            block
+            value={cmp.scopeAll ? 'all' : 'tables'}
+            options={[
+              { value: 'all', label: '全部表' },
+              { value: 'tables', label: '指定表' },
+            ]}
+            onChange={(v) => cmp.setScopeAll(v === 'all')}
+          />
+        </div>
+        {!cmp.scopeAll && (
+          <div className="cmp-field">
+            <Select
+              mode="multiple"
+              allowClear
+              showSearch
+              style={{ width: '100%' }}
+              placeholder="选择要同步的表"
+              disabled={!ep.database}
+              loading={cmp.loadingSourceTables}
+              value={cmp.sourceTables}
+              options={cmp.sourceTableList.map((t) => ({
+                value: t.name,
+                label: t.name,
+              }))}
+              onChange={(v) => cmp.setSourceTables(v)}
+            />
+          </div>
+        )}
+        <div className="cmp-field">
+          <div className="cmp-field-label">对比对象</div>
+          <Checkbox checked disabled>
+            表
+          </Checkbox>
+          <Checkbox
+            checked={cmp.compareOptions.compareIndexes}
+            onChange={(e) => cmp.setCompareOption('compareIndexes', e.target.checked)}
+            style={{ marginLeft: 12 }}
+          >
+            索引
+          </Checkbox>
+          <Checkbox
+            checked={cmp.compareOptions.compareViews}
+            onChange={(e) => cmp.setCompareOption('compareViews', e.target.checked)}
+            style={{ marginLeft: 12 }}
+          >
+            视图
+          </Checkbox>
+        </div>
+        <div className="cmp-pane-info">
+          <div className="cmp-pane-title">信息</div>
+          {infoRows.map(([label, value]) => (
+            <div key={label} className="cmp-info-row">
+              <span className="cmp-info-label">{label}:</span>
+              <span className="cmp-info-value">{value}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  /** 单目标面板 */
+  const singleTargetPanel = () => {
+    const ep = cmp.target
+    const profile = findConn(ep.connectionId)
+    const infoRows: [string, string][] = [
+      ['分组', groupNameOf(profile)],
+      ['数据库类型', 'MySQL'],
+      ['名称', profile?.name ?? '--'],
+      ['主机', profile?.host ?? '--'],
+      ['端口', profile ? String(profile.port) : '--'],
+      ['服务器版本', (profile && connected[profile.id]?.serverVersion) || '--'],
+    ]
+    return (
+      <div className="cmp-pane">
+        <div className="cmp-pane-title">目标</div>
+        <div className="cmp-field">
+          <div className="cmp-field-label">连接</div>
+          <Select
+            style={{ width: '100%' }}
+            placeholder={connectionOptions.length === 0 ? '请先创建一个连接' : '选择连接'}
+            value={ep.connectionId ?? undefined}
+            options={connectionOptions}
+            onChange={async (v) => {
+              const ok = await ensureConnected(v)
+              if (!ok) return
+              cmp.setTargetConn(v).catch((e) => message.error(errText(e)))
+            }}
+          />
+        </div>
+        <div className="cmp-field">
+          <div className="cmp-field-label">数据库</div>
+          <Select
+            style={{ width: '100%' }}
+            placeholder="选择数据库"
+            value={ep.database ?? undefined}
+            disabled={!ep.connectionId}
+            loading={cmp.loadingTargetDbs}
+            options={cmp.targetDbs.map((d) => ({
+              value: d.name,
+              label: (
+                <span>
+                  <DatabaseOutlined style={{ marginRight: 6, color: '#4a90d9' }} />
+                  {d.name}
+                </span>
+              ),
+            }))}
+            onChange={(v) => cmp.setTargetDb(v)}
           />
         </div>
         <div className="cmp-pane-info">
@@ -235,8 +384,81 @@ export function SyncSchemaModal() {
     )
   }
 
-  /** 对比进行中的进度弹层（图 7：正在比较数据库… + 取消） */
-  const phase = PHASE_META[cmp.comparePhase ?? 'connect'] ?? PHASE_META.connect
+  /** 多目标列表面板 */
+  const multiTargetPanel = () => {
+    const targetRow = (t: MultiTarget, index: number) => {
+      const profile = findConn(t.connectionId)
+      return (
+        <div key={t.key} className="cmp-target-row">
+          <div className="cmp-target-index">{index + 1}</div>
+          <div className="cmp-target-content">
+            <div className="cmp-target-fields">
+              <Select
+                style={{ flex: 1.4 }}
+                placeholder="选择连接"
+                value={t.connectionId ?? undefined}
+                options={connectionOptions}
+                onChange={async (v) => {
+                  const ok = await ensureConnected(v)
+                  if (!ok) return
+                  cmp.setTargetConnMulti(t.key, v).catch((e) => message.error(errText(e)))
+                }}
+              />
+              <Select
+                style={{ flex: 1 }}
+                placeholder="选择数据库"
+                value={t.database ?? undefined}
+                disabled={!t.connectionId}
+                loading={t.loadingDbs}
+                options={t.dbs.map((d: DatabaseBrief) => ({
+                  value: d.name,
+                  label: d.name,
+                }))}
+                onChange={(v) => cmp.setTargetDbMulti(t.key, v)}
+              />
+              <Tooltip title="删除该目标">
+                <Button
+                  type="text"
+                  danger
+                  icon={<DeleteOutlined />}
+                  onClick={() => cmp.removeTarget(t.key)}
+                  disabled={cmp.targets.length <= 1}
+                />
+              </Tooltip>
+            </div>
+            {profile && (
+              <div className="cmp-target-info">
+                {profile.name}（{profile.host}:{profile.port}）
+              </div>
+            )}
+          </div>
+        </div>
+      )
+    }
+
+    return (
+      <div className="cmp-pane cmp-targets-pane">
+        <div className="cmp-pane-title">目标列表</div>
+        <div className="cmp-targets-list">
+          {cmp.targets.map((t, i) => targetRow(t, i))}
+        </div>
+        <Button
+          type="dashed"
+          block
+          icon={<PlusOutlined />}
+          disabled={cmp.targets.length >= 8}
+          onClick={cmp.addTarget}
+          style={{ marginTop: 8 }}
+        >
+          添加目标
+        </Button>
+      </div>
+    )
+  }
+
+  const rawPhase = cmp.comparePhase ?? 'connect'
+  const isMultiPhase = rawPhase.startsWith('target ')
+  const phase = isMultiPhase ? undefined : PHASE_META[rawPhase] ?? PHASE_META.connect
   const progressOverlay = cmp.comparing && (
     <div className="cmp-progress-mask">
       <div className="cmp-progress-card">
@@ -244,8 +466,10 @@ export function SyncSchemaModal() {
           <DatabaseOutlined style={{ marginRight: 8 }} />
           正在比较数据库…
         </div>
-        <Progress percent={phase.percent} status="active" showInfo={false} />
-        <div className="cmp-progress-phase">{phase.text}</div>
+        <Progress percent={phase?.percent ?? 50} status="active" showInfo={false} />
+        <div className="cmp-progress-phase">
+          {isMultiPhase ? rawPhase.replace('target ', '目标 ') : phase?.text}
+        </div>
         <div style={{ textAlign: 'right' }}>
           <Button size="small" onClick={cmp.cancelCompare}>
             取消
@@ -255,7 +479,6 @@ export function SyncSchemaModal() {
     </div>
   )
 
-  /** 部署脚本文本：跟随选中行——明细只显该项、表行显该表全部、未选中显所有勾选项 */
   const deployItems = cmp.activeItemId
     ? (cmp.report ?? []).filter((i) => i.id === cmp.activeItemId)
     : cmp.activeTable
@@ -268,6 +491,73 @@ export function SyncSchemaModal() {
 
   const selectedSqls = selected.map((i) => i.sql).filter((s): s is string => !!s)
   const dangerousSelected = selected.filter((i) => i.dangerous).length
+
+  // 多目标模式的结果/部署页目标 Tabs：未选择库的目标不展示，标签显示连接名/库名
+  const visibleTargets = cmp.targets.filter((t) => t.database)
+  const effectiveActiveKey =
+    cmp.activeTargetKey && visibleTargets.some((t) => t.key === cmp.activeTargetKey)
+      ? cmp.activeTargetKey
+      : visibleTargets[0]?.key
+  const effectiveActiveTarget = visibleTargets.find((t) => t.key === effectiveActiveKey)
+
+  const multiTargetTabs =
+    cmp.mode === 'multi' && cmp.step !== 'select' ? (
+      <Tabs
+        activeKey={effectiveActiveKey}
+        onChange={(k) => cmp.setActiveTarget(k)}
+        size="small"
+        className="cmp-target-tabs"
+        items={visibleTargets.map((t) => {
+          const isActive = t.key === effectiveActiveKey
+          const st = cmp.targetStates[t.key]
+          const report = isActive ? cmp.report : st?.report
+          const selectedIds = isActive ? cmp.selectedIds : st?.selectedIds
+          const totalCount = report?.length ?? 0
+          const selectedCount =
+            report?.filter((i) => selectedIds?.includes(i.id)).length ?? 0
+          const hasError = !!st?.error
+          const conn = findConn(t.connectionId)
+          const color = conn?.color ? (COLOR_PRESETS[conn.color] ?? conn.color) : undefined
+          const label = (
+            <span
+              className="cmp-target-tab-label"
+              style={{
+                borderBottom: color ? `3px solid ${color}` : undefined,
+                padding: color ? '0 2px' : undefined,
+              }}
+            >
+              {conn ? `${conn.name} / ${t.database}` : t.database}
+              {hasError ? (
+                <CloseCircleOutlined style={{ color: '#ff4d4f', marginLeft: 4 }} />
+              ) : totalCount > 0 ? (
+                <Badge
+                  count={`${selectedCount}/${totalCount}`}
+                  size="small"
+                  style={{ marginLeft: 4 }}
+                />
+              ) : null}
+            </span>
+          )
+          return {
+            key: t.key,
+            label,
+          }
+        })}
+      />
+    ) : null
+
+  const targetErrorAlert =
+    cmp.mode === 'multi' && effectiveActiveTarget && cmp.targetStates[effectiveActiveTarget.key]?.error ? (
+      <Alert
+        type="error"
+        showIcon
+        style={{ marginBottom: 8, flex: 'none' }}
+        message={cmp.targetStates[effectiveActiveTarget.key]!.error!.message}
+      />
+    ) : null
+
+  const canRunCompare =
+    scopeReady && (cmp.mode === 'single' ? singleReady : multiReady)
 
   return (
     <Modal
@@ -284,22 +574,38 @@ export function SyncSchemaModal() {
         {stepTitle}
         {summaryHeader}
 
-        {/* ───── 第一步：选择源/目标（图 7/9） ───── */}
         {cmp.step === 'select' && (
           <div className="cmp-step-body">
-            <div className="cmp-panes">
-              {endpointPanel('source')}
-              <div className="cmp-swap">
-                <Button type="text" icon={<SwapOutlined />} onClick={cmp.swap} title="交换源与目标" />
-              </div>
-              {endpointPanel('target')}
+            <div style={{ textAlign: 'center', marginBottom: 10 }}>
+              <Segmented
+                value={cmp.mode}
+                options={[
+                  { value: 'single', label: '单目标' },
+                  { value: 'multi', label: '多目标' },
+                ]}
+                onChange={(v) => cmp.setMode(v as 'single' | 'multi')}
+              />
             </div>
-            {connectedOptions.length === 0 && (
+            <div className={`cmp-panes ${cmp.mode === 'multi' ? 'multi' : ''}`}>
+              {sourcePanel()}
+              {cmp.mode === 'single' && (
+                <div className="cmp-swap">
+                  <Button
+                    type="text"
+                    icon={<SwapOutlined />}
+                    onClick={cmp.swap}
+                    title="交换源与目标"
+                  />
+                </div>
+              )}
+              {cmp.mode === 'single' ? singleTargetPanel() : multiTargetPanel()}
+            </div>
+            {connectionOptions.length === 0 && (
               <Alert
                 style={{ margin: '12px 16px 0' }}
                 type="info"
                 showIcon
-                message="没有已连接的数据库——请先在左侧树中打开至少一个连接（两端可以是同一连接的不同库）"
+                message="没有可用的连接——请先在左侧新建一个连接"
               />
             )}
             <div className="cmp-footer">
@@ -307,7 +613,7 @@ export function SyncSchemaModal() {
               <Button
                 type="primary"
                 icon={<CaretRightOutlined />}
-                disabled={!bothReady}
+                disabled={!canRunCompare}
                 onClick={doCompare}
               >
                 比较
@@ -316,9 +622,10 @@ export function SyncSchemaModal() {
           </div>
         )}
 
-        {/* ───── 第二步：对比结果（图 8） ───── */}
         {cmp.step === 'diff' && (
           <div className="cmp-step-body" ref={stepBodyRef}>
+            {multiTargetTabs}
+            {targetErrorAlert}
             <div className="cmp-diff-toolbar">
               <Select
                 value={cmp.groupMode}
@@ -408,9 +715,17 @@ export function SyncSchemaModal() {
           </div>
         )}
 
-        {/* ───── 第三步：部署 ───── */}
         {cmp.step === 'deploy' && (
           <div className="cmp-step-body">
+            {multiTargetTabs}
+            {effectiveActiveTarget && (
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 8, flex: 'none' }}
+                message={`当前目标：${effectiveActiveTarget.database} @ ${findConn(effectiveActiveTarget.connectionId)?.name ?? effectiveActiveTarget.connectionId}`}
+              />
+            )}
             <Alert
               type={dangerousSelected > 0 ? 'warning' : 'info'}
               showIcon
