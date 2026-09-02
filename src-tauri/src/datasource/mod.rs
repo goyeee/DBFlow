@@ -18,6 +18,7 @@ pub trait LiveConnection: Send + Sync {
     async fn list_tables(&self, database: &str) -> AppResult<Vec<TableBrief>>;
     async fn describe_table(&self, database: &str, table: &str) -> AppResult<Vec<ColumnBrief>>;
     /// 抓取一个库的结构快照（对比/同步用）
+    #[allow(dead_code)]
     async fn snapshot_schema(&self, database: &str) -> AppResult<SchemaSnapshot> {
         self.snapshot_tables(database, None).await
     }

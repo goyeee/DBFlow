@@ -246,6 +246,8 @@ export function SyncSchemaModal() {
             value={ep.database ?? undefined}
             disabled={!ep.connectionId}
             loading={cmp.loadingSourceDbs}
+            showSearch
+            optionFilterProp="value"
             options={cmp.sourceDbs.map((d) => ({
               value: d.name,
               label: (
@@ -359,6 +361,8 @@ export function SyncSchemaModal() {
             value={ep.database ?? undefined}
             disabled={!ep.connectionId}
             loading={cmp.loadingTargetDbs}
+            showSearch
+            optionFilterProp="value"
             options={cmp.targetDbs.map((d) => ({
               value: d.name,
               label: (
@@ -410,6 +414,8 @@ export function SyncSchemaModal() {
                 value={t.database ?? undefined}
                 disabled={!t.connectionId}
                 loading={t.loadingDbs}
+                showSearch
+                optionFilterProp="value"
                 options={t.dbs.map((d: DatabaseBrief) => ({
                   value: d.name,
                   label: d.name,

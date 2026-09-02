@@ -3,6 +3,9 @@ body,
 #root {
   height: 100%;
   margin: 0;
+  /* 禁止整体页面被拖动/弹性滚动；各区域各自处理滚动 */
+  overflow: hidden;
+  overscroll-behavior: none;
   /* 工具软件默认全部禁止选中；可复制内容用下方白名单放行 */
   user-select: none;
   -webkit-user-select: none;
@@ -72,7 +75,9 @@ textarea,
 
 .sider-body {
   flex: 1;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: auto;
+  overscroll-behavior: contain;
   min-height: 0;
   padding: 6px 4px;
   /* 树节点双击不出现文本拖蓝 */
@@ -136,6 +141,32 @@ textarea,
 .tree-node-title {
   display: inline-block;
   min-width: 60%;
+  white-space: nowrap;
+}
+
+/* 左侧树超长名称不换行，节点宽度随内容撑开，整体出现横向滚动条 */
+.sider-body .ant-tree {
+  min-width: max-content;
+}
+
+.sider-body .ant-tree .ant-tree-list-holder {
+  width: max-content;
+  min-width: 100%;
+}
+
+.sider-body .ant-tree .ant-tree-treenode {
+  width: max-content;
+  min-width: 100%;
+}
+
+.sider-body .ant-tree.ant-tree-block-node .ant-tree-list-holder-inner .ant-tree-node-content-wrapper {
+  white-space: nowrap;
+  flex: 0 0 auto;
+  min-width: auto;
+}
+
+.sider-body .ant-tree-title {
+  white-space: nowrap;
 }
 
 .tree-empty {
@@ -257,6 +288,7 @@ textarea,
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 /* 弹窗内标题和整个树表区域禁止双击/三击选中 */
@@ -817,9 +849,10 @@ textarea,
   display: flex;
   justify-content: flex-end;
   gap: 6px;
-  margin-top: 6px;
+  margin-top: auto;
   padding-top: 6px;
   border-top: 1px solid rgba(5, 5, 5, 0.06);
+  background: #fff;
 }
 
 .cmp-deploy-list {

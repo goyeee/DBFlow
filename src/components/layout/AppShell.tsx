@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Dropdown, Empty, Layout, Menu, Space, Tabs, Tooltip, message } from 'antd'
 import {
   FolderAddOutlined,
@@ -56,6 +56,66 @@ export function AppShell() {
     if (!c?.color) return undefined
     return COLOR_PRESETS[c.color] ?? c.color
   }
+
+  /** 当 tabs 变化导致 activeTab 失效时，自动切到最后一个标签；
+   *  同时用一个始终合法的 effectiveActiveKey 作为 Tabs 的 activeKey，
+   *  避免状态同步延迟导致的一帧空白 */
+  const effectiveActiveKey = useMemo(() => {
+    if (tabs.length === 0) return null
+    if (tabs.some((t) => t.key === activeTab)) return activeTab
+    return tabs[tabs.length - 1].key
+  }, [tabs, activeTab])
+
+  useEffect(() => {
+    if (effectiveActiveKey !== activeTab) setActiveTab(effectiveActiveKey)
+  }, [effectiveActiveKey, activeTab, setActiveTab])
+
+  /** 标签关闭位移动画（FLIP）：先记录各标签位置，更新状态后再用 transform 补回旧位置并过渡 */
+  const withTabAnimation = (update: () => void) => {
+    const tabList = document.querySelector<HTMLElement>('.content .ant-tabs-nav-list')
+    if (!tabList) {
+      update()
+      return
+    }
+    const before = new Map<string, DOMRect>()
+    tabList.querySelectorAll<HTMLElement>('.ant-tabs-tab').forEach((el) => {
+      const key = el.getAttribute('data-node-key')
+      if (key) before.set(key, el.getBoundingClientRect())
+    })
+    update()
+    requestAnimationFrame(() => {
+      const moved: HTMLElement[] = []
+      tabList.querySelectorAll<HTMLElement>('.ant-tabs-tab').forEach((el) => {
+        const key = el.getAttribute('data-node-key')
+        const old = key ? before.get(key) : undefined
+        if (!old) return
+        const after = el.getBoundingClientRect()
+        const dx = old.left - after.left
+        if (Math.abs(dx) > 0.5) {
+          el.style.transition = 'none'
+          el.style.transform = `translateX(${dx}px)`
+          moved.push(el)
+        }
+      })
+      if (moved.length === 0) return
+      requestAnimationFrame(() => {
+        moved.forEach((el) => {
+          el.style.transition = 'transform 0.18s cubic-bezier(0.4, 0, 0.2, 1)'
+          el.style.transform = ''
+        })
+      })
+      window.setTimeout(() => {
+        moved.forEach((el) => {
+          el.style.transition = ''
+          el.style.transform = ''
+        })
+      }, 220)
+    })
+  }
+
+  const closeTabAnim = (key: string) => withTabAnimation(() => closeTab(key))
+  const closeOtherTabsAnim = (key: string) => withTabAnimation(() => closeOtherTabs(key))
+  const closeTabsToRightAnim = (key: string) => withTabAnimation(() => closeTabsToRight(key))
 
   useEffect(() => {
     load().catch((e) => message.error(errText(e)))
@@ -142,10 +202,13 @@ export function AppShell() {
             <Tabs
               type="editable-card"
               hideAdd
-              activeKey={activeTab ?? undefined}
-              onChange={(k) => setActiveTab(k)}
+              activeKey={effectiveActiveKey ?? undefined}
+              onChange={(k) => {
+                // Antd Tabs 在标签增删时可能触发 onChange 传入空字符串，需校验
+                if (tabs.some((t) => t.key === k)) setActiveTab(k)
+              }}
               onEdit={(k, action) => {
-                if (action === 'remove') closeTab(String(k))
+                if (action === 'remove') closeTabAnim(String(k))
               }}
               items={tabs.map((t, i) => {
                 const color = tabColor(t.connectionId)
@@ -174,9 +237,9 @@ export function AppShell() {
                           { key: 'reveal', label: '导航栏打开' },
                         ],
                         onClick: ({ key: action }) => {
-                          if (action === 'close') closeTab(t.key)
-                          else if (action === 'close-right') closeTabsToRight(t.key)
-                          else if (action === 'close-others') closeOtherTabs(t.key)
+                          if (action === 'close') closeTabAnim(t.key)
+                          else if (action === 'close-right') closeTabsToRightAnim(t.key)
+                          else if (action === 'close-others') closeOtherTabsAnim(t.key)
                           else if (action === 'reveal')
                             revealInTree(t.connectionId, t.database, t.table)
                         },
@@ -199,7 +262,7 @@ export function AppShell() {
                       </span>
                     </Dropdown>
                   ),
-                  children: <TableColumnsView tab={t} />,
+                  children: <TableColumnsView key={t.key} tab={t} />,
                 }
               })}
             />

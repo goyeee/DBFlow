@@ -40,6 +40,23 @@ export function ConnectionTree() {
   const ui = useUiStore()
   const [expandedKeys, setExpandedKeys] = useState<string[]>([])
   const [selectedKeys, setSelectedKeys] = useState<string[]>([])
+  // 手动控制 loadedKeys：让 rc-tree 的 loadData 只在"缓存未加载"时触发，
+  // 刷新/断开导致缓存清空后能自动重新加载，避免空缓存节点被反复请求
+  const loadedKeys = useMemo(() => {
+    const keys: string[] = []
+    for (const c of connections) {
+      if (session.dbsCache[c.id] !== undefined) {
+        keys.push(`c:${c.id}`)
+        for (const d of session.dbsCache[c.id]) {
+          if (session.tablesCache[`${c.id}/${d.name}`] !== undefined) {
+            keys.push(`d:${c.id}:${encodeURIComponent(d.name)}`)
+          }
+        }
+      }
+    }
+    return keys
+  }, [connections, session.dbsCache, session.tablesCache])
+
   // 双击防抖：双击的第二次点击不再切换展开状态
   const lastClick = useRef<{ key: string; time: number }>({ key: '', time: 0 })
 
@@ -79,8 +96,7 @@ export function ConnectionTree() {
             })
           })
         }
-        message.error(errText(e))
-        return false
+        throw e
       }
     },
     [session],
@@ -102,18 +118,17 @@ export function ConnectionTree() {
         if (type === 'c') {
           const id = rest[0]
           const cached = session.dbsCache[id]
-          // 缓存为空（含"真没有库"）时强制重新拉取——loadDatabases 的缓存短路
-          // 不会绕过空数组，必须显式 force
-          if (!cached || cached.length === 0) {
+          // undefined 表示尚未加载；空数组表示"确实没有库"，不应重复请求
+          if (cached === undefined) {
             const ok = await ensureConnected(id)
             if (!ok) throw new Error('连接失败')
             try {
-              await session.loadDatabases(id, true)
+              await session.loadDatabases(id)
             } catch (e) {
               if ((e as AppErrorInfo)?.code === 'not_found') {
                 // 后端会话已丢（如编辑保存后被断开）→ 重建后重试
                 await session.forceReconnect(id)
-                await session.loadDatabases(id, true)
+                await session.loadDatabases(id)
               } else {
                 throw e
               }
@@ -124,13 +139,13 @@ export function ConnectionTree() {
           const dbName = decodeURIComponent(db)
           const cacheKey = `${id}/${dbName}`
           const cached = session.tablesCache[cacheKey]
-          if (!cached || cached.length === 0) {
+          if (cached === undefined) {
             try {
-              await session.loadTables(id, dbName, true)
+              await session.loadTables(id, dbName)
             } catch (e) {
               if ((e as AppErrorInfo)?.code === 'not_found') {
                 await session.forceReconnect(id)
-                await session.loadTables(id, dbName, true)
+                await session.loadTables(id, dbName)
               } else {
                 throw e
               }
@@ -216,26 +231,42 @@ export function ConnectionTree() {
               />
             )}
             {c.name}
-            {c.ssh && (
-              <DisconnectOutlined style={{ marginLeft: 6, fontSize: 11 }} title="SSH 隧道" />
-            )}
           </span>
         ),
         isLeaf: false,
         children: dbs.map((d) => {
           const cacheKey = `${c.id}/${d.name}`
           const tables = session.tablesCache[cacheKey] ?? []
+          const dbKey = `d:${c.id}:${encodeURIComponent(d.name)}`
+          const dbOpen = expandedKeys.includes(dbKey)
           return {
-            key: `d:${c.id}:${encodeURIComponent(d.name)}`,
-            icon: <DatabaseOutlined />,
+            key: dbKey,
+            icon: dbOpen ? (
+              <DatabaseOutlined style={{ color: '#52c41a' }} />
+            ) : (
+              <DatabaseOutlined />
+            ),
             title: d.name,
             isLeaf: false,
-            children: tables.map((t) => ({
-              key: `t:${c.id}:${encodeURIComponent(d.name)}:${encodeURIComponent(t.name)}`,
-              icon: <TableOutlined />,
-              title: t.comment ? <span title={t.comment}>{t.name}</span> : <span>{t.name}</span>,
-              isLeaf: true,
-            })),
+            children: tables.map((t) => {
+              const tableKey = `t:${c.id}:${encodeURIComponent(d.name)}:${encodeURIComponent(t.name)}`
+              const tableOpen = session.tabs.some(
+                (tab) =>
+                  tab.connectionId === c.id &&
+                  tab.database === d.name &&
+                  tab.table === t.name,
+              )
+              return {
+                key: tableKey,
+                icon: tableOpen ? (
+                  <TableOutlined style={{ color: '#52c41a' }} />
+                ) : (
+                  <TableOutlined />
+                ),
+                title: t.comment ? <span title={t.comment}>{t.name}</span> : <span>{t.name}</span>,
+                isLeaf: true,
+              }
+            }),
           }
         }),
       }
@@ -266,7 +297,7 @@ export function ConnectionTree() {
       })
     }
     return nodes
-  }, [groups, connections, session.connected, session.connecting, session.dbsCache, session.tablesCache])
+  }, [groups, connections, session.connected, session.connecting, session.dbsCache, session.tablesCache, expandedKeys, session.tabs])
 
   if (connections.length === 0 && groups.length === 0) {
     return (
@@ -287,16 +318,10 @@ export function ConnectionTree() {
       treeData={wrapContextMenu(treeData, { ensureConnected, setExpandedKeys })}
       expandedKeys={expandedKeys}
       selectedKeys={selectedKeys}
+      loadedKeys={loadedKeys}
       onExpand={(keys) => {
-        const next = keys as string[]
-        // 新展开的节点主动保证数据（rc-tree 的 loadData 只对"未加载"节点触发，
-        // 若之前静默失败过会被它的 loadedKeys 记忆跳过）
-        next
-          .filter((k) => !expandedKeys.includes(k))
-          .forEach((k) => {
-            loadData(k).catch(() => {})
-          })
-        setExpandedKeys(next)
+        // 展开状态由 rc-tree 的 loadData 自动加载子节点；这里只同步受控 keys
+        setExpandedKeys(keys as string[])
       }}
       loadData={(node) => loadData(String(node.key))}
       onSelect={(keys, info) => {
@@ -324,12 +349,10 @@ export function ConnectionTree() {
 
         if (isDoubleClick) return
 
-        // 单击连接/库/分组节点 = 展开/收起（不必去点小箭头）
-        const expanding = !expandedKeys.includes(key)
+        // 单击连接/库/分组节点 = 展开/收起（loadData 由 rc-tree 自动触发）
         setExpandedKeys((prev) =>
           prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key],
         )
-        if (expanding) loadData(key).catch(() => {})
       }}
     />
   )
@@ -361,7 +384,8 @@ function wrapContextMenu(
               { type: 'divider' },
               { key: 'del', label: '删除连接', danger: true },
             ],
-            onClick: async ({ key: action }) => {
+            onClick: async ({ key: action, domEvent }) => {
+              domEvent.stopPropagation()
               const id = rest[0]
               const { connections: conns, removeLocal: rm } = useConnectionsStore.getState()
               const session = useSessionStore.getState()
@@ -410,7 +434,8 @@ function wrapContextMenu(
           trigger={['contextMenu']}
           menu={{
             items: [{ key: 'close', label: '关闭' }],
-            onClick: ({ key: action }) => {
+            onClick: ({ key: action, domEvent }) => {
+              domEvent.stopPropagation()
               if (action !== 'close') return
               const [id, db] = rest
               useSessionStore.getState().closeDatabaseTabs(id, decodeURIComponent(db))
@@ -436,7 +461,8 @@ function wrapContextMenu(
                     { key: 'del', label: '删除分组', danger: true },
                   ]),
             ],
-            onClick: async ({ key: action }) => {
+            onClick: async ({ key: action, domEvent }) => {
+              domEvent.stopPropagation()
               const ui = useUiStore.getState()
               const groupId = isNone ? null : rest[0]
               const group = isNone
