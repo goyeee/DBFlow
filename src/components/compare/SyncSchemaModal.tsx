@@ -83,6 +83,33 @@ export function SyncSchemaModal() {
     return groups.find((g) => g.id === p.groupId)?.name ?? '未分组'
   }
 
+  /** 根据源库名对目标库做模糊匹配（忽略大小写，互相包含都算） */
+  const fuzzyMatchDbs = (sourceDb: string | null, dbs: DatabaseBrief[]) => {
+    if (!sourceDb) return []
+    const term = sourceDb.toLowerCase()
+    return dbs.filter((d) => {
+      const name = d.name.toLowerCase()
+      return name.includes(term) || term.includes(name)
+    })
+  }
+  const isFuzzyMatch = (sourceDb: string | null, name: string) => {
+    if (!sourceDb) return false
+    const term = sourceDb.toLowerCase()
+    const n = name.toLowerCase()
+    return n.includes(term) || term.includes(n)
+  }
+  /** 把匹配项排在下拉列表前面 */
+  const sortedDbs = (sourceDb: string | null, dbs: DatabaseBrief[]) => {
+    if (!sourceDb) return dbs
+    const matches: DatabaseBrief[] = []
+    const others: DatabaseBrief[] = []
+    for (const d of dbs) {
+      if (isFuzzyMatch(sourceDb, d.name)) matches.push(d)
+      else others.push(d)
+    }
+    return [...matches, ...others]
+  }
+
   const selected = useMemo(
     () => (cmp.report ?? []).filter((i) => cmp.selectedIds.includes(i.id)),
     [cmp.report, cmp.selectedIds],
@@ -105,6 +132,51 @@ export function SyncSchemaModal() {
   const [bottomHeight, setBottomHeight] = useState(300)
   const dragRef = useRef<{ startY: number; startH: number } | null>(null)
   const initializedRef = useRef(false)
+
+  // 目标库自动提示：选择目标连接后，如果目标连接里有与源库同名/相似的数据库，
+  // 自动打开下拉框并把匹配项排在前面；有完全同名时自动预选上。
+  const [openTargetDb, setOpenTargetDb] = useState(false)
+  const [openMultiTargetDbKeys, setOpenMultiTargetDbKeys] = useState<Set<string>>(new Set())
+  const triggeredTargetDbRef = useRef(false)
+  const triggeredMultiTargetDbRef = useRef<Set<string>>(new Set())
+
+  useEffect(() => {
+    if (
+      !cmp.source.database ||
+      cmp.target.database ||
+      cmp.targetDbs.length === 0 ||
+      triggeredTargetDbRef.current
+    )
+      return
+    const matches = fuzzyMatchDbs(cmp.source.database, cmp.targetDbs)
+    if (matches.length === 0) return
+    triggeredTargetDbRef.current = true
+    const exact = matches.find((d) => d.name.toLowerCase() === cmp.source.database!.toLowerCase())
+    if (exact) cmp.setTargetDb(exact.name)
+    setOpenTargetDb(true)
+  }, [cmp.source.database, cmp.target.database, cmp.targetDbs])
+
+  useEffect(() => {
+    triggeredTargetDbRef.current = false
+  }, [cmp.target.connectionId, cmp.source.database])
+
+  useEffect(() => {
+    if (!cmp.source.database) return
+    const toOpen = new Set<string>()
+    for (const t of cmp.targets) {
+      if (!t.connectionId || t.database || t.dbs.length === 0) continue
+      if (triggeredMultiTargetDbRef.current.has(t.key)) continue
+      const matches = fuzzyMatchDbs(cmp.source.database, t.dbs)
+      if (matches.length === 0) continue
+      triggeredMultiTargetDbRef.current.add(t.key)
+      const exact = matches.find((d) => d.name.toLowerCase() === cmp.source.database!.toLowerCase())
+      if (exact) cmp.setTargetDbMulti(t.key, exact.name)
+      toOpen.add(t.key)
+    }
+    if (toOpen.size > 0) {
+      setOpenMultiTargetDbKeys((prev) => new Set([...prev, ...toOpen]))
+    }
+  }, [cmp.source.database, cmp.targets])
 
   useEffect(() => {
     if (cmp.step === 'diff' && cmp.report && cmp.report.length > 0 && !initializedRef.current) {
@@ -349,6 +421,8 @@ export function SyncSchemaModal() {
             onChange={async (v) => {
               const ok = await ensureConnected(v)
               if (!ok) return
+              triggeredTargetDbRef.current = false
+              setOpenTargetDb(false)
               cmp.setTargetConn(v).catch((e) => message.error(errText(e)))
             }}
           />
@@ -363,12 +437,17 @@ export function SyncSchemaModal() {
             loading={cmp.loadingTargetDbs}
             showSearch
             optionFilterProp="value"
-            options={cmp.targetDbs.map((d) => ({
+            open={openTargetDb}
+            onDropdownVisibleChange={(open) => setOpenTargetDb(open)}
+            options={sortedDbs(cmp.source.database, cmp.targetDbs).map((d) => ({
               value: d.name,
               label: (
                 <span>
                   <DatabaseOutlined style={{ marginRight: 6, color: '#4a90d9' }} />
                   {d.name}
+                  {isFuzzyMatch(cmp.source.database, d.name) && (
+                    <CheckCircleOutlined style={{ marginLeft: 6, color: '#52c41a' }} />
+                  )}
                 </span>
               ),
             }))}
@@ -405,6 +484,12 @@ export function SyncSchemaModal() {
                 onChange={async (v) => {
                   const ok = await ensureConnected(v)
                   if (!ok) return
+                  triggeredMultiTargetDbRef.current.delete(t.key)
+                  setOpenMultiTargetDbKeys((prev) => {
+                    const next = new Set(prev)
+                    next.delete(t.key)
+                    return next
+                  })
                   cmp.setTargetConnMulti(t.key, v).catch((e) => message.error(errText(e)))
                 }}
               />
@@ -416,9 +501,25 @@ export function SyncSchemaModal() {
                 loading={t.loadingDbs}
                 showSearch
                 optionFilterProp="value"
-                options={t.dbs.map((d: DatabaseBrief) => ({
+                open={openMultiTargetDbKeys.has(t.key)}
+                onDropdownVisibleChange={(open) =>
+                  setOpenMultiTargetDbKeys((prev) => {
+                    const next = new Set(prev)
+                    if (open) next.add(t.key)
+                    else next.delete(t.key)
+                    return next
+                  })
+                }
+                options={sortedDbs(cmp.source.database, t.dbs).map((d: DatabaseBrief) => ({
                   value: d.name,
-                  label: d.name,
+                  label: (
+                    <span>
+                      {d.name}
+                      {isFuzzyMatch(cmp.source.database, d.name) && (
+                        <CheckCircleOutlined style={{ marginLeft: 6, color: '#52c41a' }} />
+                      )}
+                    </span>
+                  ),
                 }))}
                 onChange={(v) => cmp.setTargetDbMulti(t.key, v)}
               />
@@ -525,13 +626,13 @@ export function SyncSchemaModal() {
           const conn = findConn(t.connectionId)
           const color = conn?.color ? (COLOR_PRESETS[conn.color] ?? conn.color) : undefined
           const label = (
-            <span
-              className="cmp-target-tab-label"
-              style={{
-                borderBottom: color ? `3px solid ${color}` : undefined,
-                padding: color ? '0 2px' : undefined,
-              }}
-            >
+            <span className="cmp-target-tab-label">
+              {color && (
+                <span
+                  className="color-dot"
+                  style={{ background: color, marginRight: 6, verticalAlign: 'middle' }}
+                />
+              )}
               {conn ? `${conn.name} / ${t.database}` : t.database}
               {hasError ? (
                 <CloseCircleOutlined style={{ color: '#ff4d4f', marginLeft: 4 }} />
@@ -809,6 +910,7 @@ export function SyncSchemaModal() {
                   <Button
                     type="primary"
                     danger={dangerousSelected > 0}
+                    disabled={cmp.applying || selectedSqls.length === 0}
                     loading={cmp.applying}
                     onClick={() => cmp.deploy().catch((e) => message.error(errText(e)))}
                   >
