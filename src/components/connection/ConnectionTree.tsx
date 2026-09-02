@@ -419,6 +419,11 @@ function wrapContextMenu(
                 const ok = await ctx.ensureConnected(id)
                 if (ok) ctx.setExpandedKeys((prev) => [...new Set([...prev, `c:${id}`])])
               } else if (action === 'disconnect') {
+                // 先折叠，再清状态；否则 rc-tree 看到 expandedKeys 还在、loadedKeys 被清空，
+                // 会立即触发 loadData 重新连接，导致“折叠了但图标还是绿色”。
+                ctx.setExpandedKeys((prev) =>
+                  prev.filter((k) => k !== `c:${id}` && !k.startsWith(`d:${id}:`)),
+                )
                 await session.disconnect(id)
               }
             },
