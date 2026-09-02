@@ -117,6 +117,7 @@ impl MySqlLive {
         Self { pool, lease }
     }
 
+    #[allow(dead_code)]
     pub fn pool(&self) -> &MySqlPool {
         &self.pool
     }
