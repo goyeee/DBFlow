@@ -72,12 +72,58 @@ pub struct DiffItem {
     pub target_ddl: Option<String>,
 }
 
+/// 目标端是否支持该 collation：`*_0900_*` 系需要 MySQL 8.0+（5.6/5.7 无）
+fn collation_ok_on_target(server_version: Option<&str>, coll: &str) -> bool {
+    if !coll.contains("_0900_") {
+        return true;
+    }
+    let major = server_version
+        .and_then(|v| v.split('.').next())
+        .and_then(|m| m.parse::<u32>().ok())
+        .unwrap_or(8);
+    major >= 8
+}
+
+/// 目标端不支持的 collation 映射为该字符集的通用等价：
+/// `*_0900_ai_ci` → `{charset}_general_ci`，`*_0900_bin` → `{charset}_bin`。
+/// 这样跨版本（8.x → 5.6/5.7）对比不产生无法落地的假差异，生成的 SQL 也能在目标端执行。
+fn map_collation(server_version: Option<&str>, coll: Option<String>) -> Option<String> {
+    let c = coll?;
+    if collation_ok_on_target(server_version, &c) {
+        return Some(c);
+    }
+    let charset = c.split('_').next().unwrap_or(&c).to_string();
+    let fallback = if c.ends_with("_bin") {
+        format!("{charset}_bin")
+    } else {
+        format!("{charset}_general_ci")
+    };
+    Some(fallback)
+}
+
+/// 用目标端能力归一化双侧 collation（表级默认 + 每列），使 diff 与 SQL 生成都基于目标端可表达的形态
+fn normalize_collations(snap: &mut SchemaSnapshot, target_version: Option<&str>) {
+    for t in &mut snap.tables {
+        t.collation = map_collation(target_version, t.collation.take());
+        for c in &mut t.columns {
+            c.collation = map_collation(target_version, c.collation.take());
+        }
+    }
+}
+
 /// 源快照 vs 目标快照 → 差异项（目标端如何变更才能与源一致）
 pub fn diff_snapshots(
     source: &SchemaSnapshot,
     target: &SchemaSnapshot,
     options: &CompareOptions,
 ) -> Vec<DiffItem> {
+    // 以目标端服务器版本为准归一化 collation（克隆后修改，不影响调用方）
+    let mut source = source.clone();
+    let mut target = target.clone();
+    let target_version = target.server_version.clone();
+    normalize_collations(&mut source, target_version.as_deref());
+    normalize_collations(&mut target, target_version.as_deref());
+
     let src: BTreeMap<&str, &TableDef> = source.tables.iter().map(|t| (t.name.as_str(), t)).collect();
     let tgt: BTreeMap<&str, &TableDef> = target.tables.iter().map(|t| (t.name.as_str(), t)).collect();
 
@@ -595,6 +641,93 @@ mod tests {
         diff_snapshots(a, b, &CompareOptions::default())
     }
 
+    fn snap_v(db: &str, tables: Vec<TableDef>, version: &str) -> SchemaSnapshot {
+        SchemaSnapshot {
+            database: db.into(),
+            tables,
+            views: Vec::new(),
+            server_version: Some(version.into()),
+        }
+    }
+
+    fn col_cs(name: &str, coll: &str) -> ColumnDef {
+        ColumnDef {
+            character_set: Some(coll.split('_').next().unwrap_or("utf8mb4").into()),
+            collation: Some(coll.into()),
+            ..col(name, "varchar(20)", false)
+        }
+    }
+
+    #[test]
+    fn cross_version_0900_collation_normalized_away() {
+        // 8.4 源(0900_ai_ci) → 5.6 目标(general_ci)：目标端无 0900，应视为等价，无差异
+        let src = snap_v(
+            "src",
+            vec![TableDef {
+                collation: Some("utf8mb4_0900_ai_ci".into()),
+                ..table("t", vec![col_cs("name", "utf8mb4_0900_ai_ci")], vec![])
+            }],
+            "8.4.11",
+        );
+        let tgt = snap_v(
+            "tgt",
+            vec![TableDef {
+                collation: Some("utf8mb4_general_ci".into()),
+                ..table("t", vec![col_cs("name", "utf8mb4_general_ci")], vec![])
+            }],
+            "5.6.40",
+        );
+        let items = diff(&src, &tgt);
+        assert!(items.is_empty(), "0900 系在低版本目标上不应产生差异: {items:?}");
+    }
+
+    #[test]
+    fn same_version_0900_collation_still_diff() {
+        // 双端都是 8.x：0900 vs general 仍是真实差异，SQL 保留 0900
+        let src = snap_v(
+            "src",
+            vec![table("t", vec![col_cs("name", "utf8mb4_0900_ai_ci")], vec![])],
+            "8.4.11",
+        );
+        let tgt = snap_v(
+            "tgt",
+            vec![table("t", vec![col_cs("name", "utf8mb4_general_ci")], vec![])],
+            "8.0.36",
+        );
+        let items = diff(&src, &tgt);
+        assert!(
+            items.iter().any(|i| i.id == "col:t:name"
+                && i.sql.as_deref().unwrap_or("").contains("utf8mb4_0900_ai_ci")),
+            "{items:?}"
+        );
+    }
+
+    #[test]
+    fn cross_version_collation_map_bin_and_real_diff_kept() {
+        // 0900_bin ↔ bin 等价；general_ci ↔ bin 是真实差异且 SQL 不再带 0900
+        let src = snap_v(
+            "src",
+            vec![
+                table("t1", vec![col_cs("a", "utf8mb4_0900_bin")], vec![]),
+                table("t2", vec![col_cs("a", "utf8mb4_general_ci")], vec![]),
+            ],
+            "8.4.11",
+        );
+        let tgt = snap_v(
+            "tgt",
+            vec![
+                table("t1", vec![col_cs("a", "utf8mb4_bin")], vec![]),
+                table("t2", vec![col_cs("a", "utf8mb4_bin")], vec![]),
+            ],
+            "5.7.44",
+        );
+        let items = diff(&src, &tgt);
+        assert_eq!(items.len(), 1, "仅 t2 应有差异: {items:?}");
+        let sql = items[0].sql.as_deref().unwrap();
+        assert!(sql.contains("utf8mb4_general_ci"), "{sql}");
+        assert!(!sql.contains("0900"), "{sql}");
+    }
+
     // 小构造器
     impl TableDef {
         fn with_columns(mut self, cols: Vec<ColumnDef>) -> Self {
@@ -619,6 +752,7 @@ mod tests {
             database: db.into(),
             tables,
             views: Vec::new(),
+            server_version: None,
         }
     }
 
@@ -999,6 +1133,7 @@ mod tests {
             database: db.into(),
             tables,
             views,
+            server_version: None,
         }
     }
 

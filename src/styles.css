@@ -17,6 +17,7 @@ textarea,
 [contenteditable='true'],
 .sql-view,
 .cmp-deploy-error,
+.cmp-error-text,
 .ant-alert-message,
 .table-cols-view,
 .selectable {
@@ -950,4 +951,244 @@ textarea,
   word-break: break-all;
   margin: 0;
   max-width: 760px;
+}
+
+/* ───────── 数据同步（datacmp） ───────── */
+/* Navicat 式结果页：上方表级总表 + 下方行级左右对照 */
+.dcmp-navi-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-height: 0;
+}
+.dcmp-grid-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: none;
+  min-height: 22px;
+}
+/* 结果页表格统一紧凑行高（对齐 Navicat 密度） */
+.dcmp-table-grid .ant-table-tbody > tr > td,
+.dcmp-table-grid .ant-table-thead > tr > th {
+  padding: 2px 8px !important;
+}
+.dcmp-table-grid {
+  flex: 0 1 auto;
+  max-height: 34%;
+  overflow: auto;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+}
+.dcmp-sbs {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dcmp-sbs-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  min-height: 24px;
+}
+/* 左右双面板：中间分隔条，各自带滚动条，滚动位置双向同步 */
+.dcmp-sbs-panes {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 0;
+}
+/* 行勾选窄条：贴弹窗左侧，与源数据区隔开（margin-right）；无横向内容，纵向跟随同步 */
+.dcmp-rowchecks {
+  flex: 0 0 36px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px 0 0 6px;
+  border-right: none;
+  background: #fafafa;
+  overflow: hidden;
+  margin-right: 4px;
+}
+.dcmp-rowchecks-head {
+  flex: none;
+  height: 25px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-bottom: 1px solid #f0f0f0;
+}
+.dcmp-rowchecks-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.dcmp-check-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+  width: 100%;
+}
+/* 表头占位与数据面板列头严格等高；sticky 保证同步滚动时钉在顶部 */
+.dcmp-check-table .dcmp-check-head-cell,
+.dcmp-pane-table thead th {
+  box-sizing: border-box;
+  height: 26px;
+  padding: 0 8px;
+  border-bottom: 1px solid #e8e8e8;
+}
+.dcmp-check-table .dcmp-check-head-cell {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #fafafa;
+}
+.dcmp-check-table td {
+  box-sizing: border-box;
+  height: 24px;
+  padding: 0;
+  text-align: center;
+  line-height: 22px;
+  border-bottom: 1px solid #f5f5f5;
+}
+.dcmp-pane {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #f0f0f0;
+  border-radius: 0 6px 6px 0;
+  overflow: hidden;
+}
+.dcmp-sbs-panes > .dcmp-pane:first-of-type {
+  border-radius: 6px;
+}
+.dcmp-pane-head {
+  flex: none;
+  height: 25px;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  background: #fafafa;
+  border-bottom: 1px solid #f0f0f0;
+}
+.dcmp-pane-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.dcmp-sbs-divider {
+  flex: 0 0 5px;
+  background: #e8e8e8;
+}
+.dcmp-pane-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+  width: max-content;
+  min-width: 100%;
+  font-size: 12px;
+}
+.dcmp-pane-table th,
+.dcmp-pane-table td {
+  box-sizing: border-box;
+  width: 128px;
+  max-width: 128px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  border-bottom: 1px solid #f5f5f5;
+}
+.dcmp-pane-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #fafafa;
+  font-weight: 600;
+  line-height: 24px;
+}
+/* 数据行：border-box 定高，与勾选条行严格一致（不再用 content-visibility，
+   其占位高与实际高不等会导致三区逐行错位） */
+.dcmp-pane-table tbody td {
+  height: 24px;
+  padding: 0 8px;
+  line-height: 22px;
+}
+.dcmp-equal-text {
+  color: #aaa;
+}
+.dcmp-msg {
+  color: #999;
+  font-size: 12px;
+}
+.dcmp-delete-count {
+  color: #cf1322;
+}
+.dcmp-table-active > td {
+  background: #e6f4ff !important;
+}
+.dcmp-cat-zero {
+  color: #bbb;
+}
+.dcmp-cat-insert,
+.dcmp-cat-insert .ant-checkbox + span {
+  color: #389e0d;
+}
+.dcmp-cat-update,
+.dcmp-cat-update .ant-checkbox + span {
+  color: #d48806;
+}
+.dcmp-cat-delete,
+.dcmp-cat-delete .ant-checkbox + span {
+  color: #cf1322;
+}
+.dcmp-row-insert > td {
+  background: #f6ffed;
+}
+.dcmp-row-delete > td {
+  background: #fff2f0;
+}
+.dcmp-row-update > td {
+  background: #fffbe6;
+}
+.dcmp-cell-changed {
+  color: #cf1322;
+  font-weight: 600;
+  border-bottom: 1px dashed #cf1322;
+}
+.dcmp-cell-diff {
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.dcmp-cell-diff th,
+.dcmp-cell-diff td {
+  border: 1px solid #f0f0f0;
+  padding: 2px 10px;
+  text-align: left;
+}
+.dcmp-cell-source {
+  color: #d48806;
+}
+.dcmp-cell-target {
+  color: #cf1322;
+}
+.dcmp-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #999;
+}
+.dcmp-options {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #666;
 }

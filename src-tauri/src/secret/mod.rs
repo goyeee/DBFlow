@@ -17,6 +17,10 @@ use crate::error::{AppError, AppResult};
 ///
 /// "记住密码"：勾选后密码同时写入配置目录的 secrets.json（仅混淆、非加密，
 /// 见文件底部说明），读取时优先命中本地文件，彻底绕开钥匙串授权问题。
+///
+/// dev 构建（debug_assertions）额外自动落盘：set 时同步写本地，get 从钥匙串
+/// 读到后也迁移写本地——老连接最多再弹一次授权框，此后重编译永远不再弹。
+/// 发布版不受影响，仍严格按「记住密码」勾选决定是否落盘。
 const SERVICE: &str = "com.dbflow.secrets";
 
 type CacheKey = (Uuid, SecretKind);
@@ -65,6 +69,12 @@ pub fn set(profile_id: Uuid, kind: SecretKind, secret: &str) -> AppResult<()> {
     let entry = keyring::Entry::new(SERVICE, &account(profile_id, kind))?;
     entry.set_password(secret).map_err(AppError::from)?;
     cache_put((profile_id, kind), secret.to_string());
+    // dev 构建二进制签名每次编译都变，钥匙串 ACL 记不住——同步落一份本地，
+    // 让读取命中文件、彻底绕开钥匙串。发布版仍按「记住密码」勾选走 sync_local。
+    #[cfg(debug_assertions)]
+    {
+        let _ = set_local(profile_id, kind, secret);
+    }
     Ok(())
 }
 
@@ -82,6 +92,11 @@ pub fn get(profile_id: Uuid, kind: SecretKind) -> AppResult<Option<String>> {
     let entry = keyring::Entry::new(SERVICE, &account(profile_id, kind))?;
     match entry.get_password() {
         Ok(s) => {
+            // dev 构建读到钥匙串后迁移到本地文件：老连接只弹这一次，之后重编译不再弹
+            #[cfg(debug_assertions)]
+            {
+                let _ = set_local(profile_id, kind, &s);
+            }
             cache_put((profile_id, kind), s.clone());
             Ok(Some(s))
         }

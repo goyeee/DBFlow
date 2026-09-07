@@ -705,7 +705,8 @@ export const useCompareStore = create<CompareState>((set, get) => ({
         tables,
         compareOptions,
       )
-      const visible = items.filter((i) => !i.id.startsWith('tblopt:'))
+      // 表选项（ENGINE/默认 collation/COMMENT）差异同样展示，不再过滤
+      const visible = items
       visible.sort((a, b) =>
         a.table === b.table ? a.id.localeCompare(b.id) : a.table.localeCompare(b.table, 'zh'),
       )
@@ -766,7 +767,7 @@ export const useCompareStore = create<CompareState>((set, get) => ({
       for (const r of reports) {
         const t = readyTargets.find((x) => x.key === r.key)
         if (!t) continue
-        const visible = r.items.filter((i) => !i.id.startsWith('tblopt:'))
+        const visible = r.items
         visible.sort((a, b) =>
           a.table === b.table ? a.id.localeCompare(b.id) : a.table.localeCompare(b.table, 'zh'),
         )

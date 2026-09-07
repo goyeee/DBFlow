@@ -1,13 +1,13 @@
 use std::time::Duration;
 
 use sqlx::mysql::{MySqlConnectOptions, MySqlPool, MySqlPoolOptions, MySqlSslMode};
-use sqlx::{Connection, Row};
+use sqlx::{Column, Connection, Row, TypeInfo};
 
 use crate::config::model::{ConnectionProfile, SslMode};
 use crate::error::{AppError, AppResult};
 
 use super::{
-    ColumnBrief, DatabaseBrief, LiveConnection, SchemaSnapshot, TableBrief,
+    ColumnBrief, DatabaseBrief, LiveConnection, SchemaSnapshot, TableBrief, Value,
     ViewDef,
 };
 use crate::tunnel::TunnelLease;
@@ -72,6 +72,15 @@ pub async fn open_pool(
     let pool = MySqlPoolOptions::new()
         .max_connections(4)
         .acquire_timeout(acquire_timeout(profile))
+        // 固定会话时区：TIMESTAMP 按会话时区回显，两端时区不同会产生假差异
+        .after_connect(|conn, _meta| {
+            Box::pin(async move {
+                sqlx::raw_sql(sqlx::AssertSqlSafe("SET time_zone = '+00:00'"))
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
         .connect_with(opts)
         .await?;
     Ok(pool)
@@ -426,10 +435,15 @@ impl LiveConnection for MySqlLive {
             }
         }
 
+        // 服务器版本：跨版本对比时把 0900 系 collation 归一化为低版本等价
+        let server_version: Option<String> =
+            sqlx::query_scalar("SELECT VERSION()").fetch_one(&self.pool).await.ok();
+
         Ok(SchemaSnapshot {
             database: database.to_string(),
             tables: tables.into_values().collect(),
             views,
+            server_version,
         })
     }
 
@@ -441,6 +455,66 @@ impl LiveConnection for MySqlLive {
         sqlx::raw_sql(sqlx::AssertSqlSafe(owned.as_str()))
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    async fn fetch_rows_chunk(
+        &self,
+        database: &str,
+        table: &str,
+        select_exprs: &[String],
+        key_columns: &[String],
+        after_key: Option<&[Value]>,
+        limit: u32,
+    ) -> AppResult<Vec<Vec<Value>>> {
+        let mut sql = format!(
+            "SELECT {} FROM {}.{}",
+            select_exprs.join(", "),
+            quote_ident(database),
+            quote_ident(table),
+        );
+        if after_key.is_some() {
+            if key_columns.len() == 1 {
+                sql.push_str(&format!(" WHERE {} > ?", quote_ident(&key_columns[0])));
+            } else {
+                // 多列键用行构造器做元组比较：(a,b) > (?,?)
+                let cols = key_columns
+                    .iter()
+                    .map(|c| quote_ident(c))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let marks = vec!["?"; key_columns.len()].join(",");
+                sql.push_str(&format!(" WHERE ({cols}) > ({marks})"));
+            }
+        }
+        let order = key_columns
+            .iter()
+            .map(|c| quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql.push_str(&format!(" ORDER BY {order} LIMIT {limit}"));
+
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
+        if let Some(key) = after_key {
+            for v in key {
+                q = bind_value(q, v);
+            }
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+        rows.iter().map(decode_row).collect()
+    }
+
+    async fn execute_batch_tx(&self, sqls: &[String]) -> AppResult<()> {
+        let mut conn = self.pool.acquire().await?;
+        run_dml(&mut conn, "SET FOREIGN_KEY_CHECKS=0").await?;
+        run_dml(&mut conn, "START TRANSACTION").await?;
+        for sql in sqls {
+            if let Err(e) = run_dml(&mut conn, sql).await {
+                let _ = run_dml(&mut conn, "ROLLBACK").await;
+                return Err(e);
+            }
+        }
+        run_dml(&mut conn, "COMMIT").await?;
         Ok(())
     }
 
@@ -457,6 +531,86 @@ impl LiveConnection for MySqlLive {
         self.pool.close().await;
         // 隧道租随 MySqlLive 一起 Drop 释放（引用计数 -1，归零后延迟回收）
     }
+}
+
+// ───────────────────────── 行数据拉取辅助 ─────────────────────────
+
+/// 事务内执行一条 DML（raw_sql 文本协议；SQL 为后端生成，值已转义）
+async fn run_dml(conn: &mut sqlx::mysql::MySqlConnection, sql: &str) -> AppResult<()> {
+    let owned = sql.to_owned();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(owned.as_str()))
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+fn quote_ident(name: &str) -> String {
+    format!("`{}`", name.replace('`', "``"))
+}
+
+/// keyset 分页的键值绑定（键列不含 NULL：主键/全 NOT NULL 唯一索引）
+fn bind_value<'q>(
+    q: sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments>,
+    v: &Value,
+) -> sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments> {
+    match v {
+        Value::Null => q.bind(Option::<String>::None),
+        Value::Int(x) => q.bind(*x),
+        Value::UInt(x) => q.bind(*x),
+        Value::Float(x) => q.bind(*x),
+        // 时间/小数键以规范化文本绑定，MySQL 与列比较时自动强制转换，序保持一致
+        Value::Decimal(s) | Value::Text(s) | Value::Date(s) | Value::DateTime(s) | Value::Time(s) => {
+            q.bind(s.clone())
+        }
+        Value::Bytes(b) => q.bind(b.clone()),
+    }
+}
+
+/// 把一行按结果集列类型解码为 Value。
+/// 时间/小数/BIT/JSON 列已在 SELECT 里被包装成文本/无符号整数（见 datacmp 引擎），
+/// 所以这里只需处理整数、浮点、二进制与文本四大类。
+fn decode_row(row: &sqlx::mysql::MySqlRow) -> AppResult<Vec<Value>> {
+    let n = row.columns().len();
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let raw = row.try_get_raw(i).map_err(AppError::from)?;
+        if sqlx::ValueRef::is_null(&raw) {
+            out.push(Value::Null);
+            continue;
+        }
+        let tname = row.columns()[i].type_info().name().to_ascii_uppercase();
+        let base = tname
+            .split(|c: char| c == ' ' || c == '(')
+            .next()
+            .unwrap_or("");
+        let unsigned = tname.contains("UNSIGNED");
+        let v = match base {
+            "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "INTEGER" | "BIGINT" => {
+                if unsigned {
+                    Value::UInt(row.try_get::<u64, _>(i)?)
+                } else {
+                    Value::Int(row.try_get::<i64, _>(i)?)
+                }
+            }
+            "FLOAT" => Value::Float(row.try_get::<f32, _>(i)? as f64),
+            "DOUBLE" | "REAL" => Value::Float(row.try_get::<f64, _>(i)?),
+            // BOOLEAN 即 tinyint(1)，sqlx 协议类型名报作 BOOLEAN，不落在 TINYINT 分支
+            "BOOLEAN" | "BOOL" => match row.try_get::<i8, _>(i) {
+                Ok(v) => Value::Int(v as i64),
+                // 无符号 tinyint(1) 可能超出 i8，退回 u8
+                Err(_) => Value::UInt(row.try_get::<u8, _>(i)? as u64),
+            },
+            "BINARY" | "VARBINARY" | "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB"
+            | "GEOMETRY" | "POINT" | "LINESTRING" | "POLYGON" | "MULTIPOINT"
+            | "MULTILINESTRING" | "MULTIPOLYGON" | "GEOMETRYCOLLECTION" => {
+                Value::Bytes(row.try_get::<Vec<u8>, _>(i)?)
+            }
+            // VARCHAR/TEXT/ENUM/SET 及 DATE_FORMAT/CAST 包装产物一律按文本
+            _ => Value::Text(row.try_get::<String, _>(i)?),
+        };
+        out.push(v);
+    }
+    Ok(out)
 }
 
 /// 诊断：用用户真实保存的连接配置（connections.json + 钥匙串密码）
@@ -638,5 +792,107 @@ mod e2e_tests {
             .expect_err("错误密码不应连接成功");
         let msg = err.to_string();
         assert!(msg.contains("用户名或密码错误"), "错误文案不友好: {msg}");
+    }
+
+    #[tokio::test]
+    async fn e2e_decode_tinyint1_boolean() {
+        // 回归：BOOLEAN（tinyint(1)）列在 sqlx 协议层类型名为 BOOLEAN，
+        // 曾掉进 decode_row 的 String 回退导致 8.4/5.6 数据对比整体报错。
+        if !e2e_enabled() {
+            eprintln!("跳过（未设置 DBFLOW_E2E）");
+            return;
+        }
+        for (port, password) in [(3306u16, "dbflow-a-2026"), (3307u16, "123123")] {
+            let profile = test_profile();
+            let endpoint = ConnectEndpoint { host: "127.0.0.1".into(), port };
+            let pool = open_pool(&profile, &endpoint, Some(password))
+                .await
+                .unwrap_or_else(|e| panic!("port {port} 连接失败: {e}"));
+            let live = MySqlLive::new(pool, None);
+            let rows = live
+                .fetch_rows_chunk(
+                    "cmp_demo",
+                    "t_types",
+                    &["id".into(), "flag".into()],
+                    &["id".into()],
+                    None,
+                    100,
+                )
+                .await
+                .unwrap_or_else(|e| panic!("port {port} 解码 t_types 失败: {e}"));
+            assert_eq!(rows.len(), 5, "port {port}");
+            for r in &rows {
+                assert!(
+                    matches!(r[1], Value::Int(_) | Value::UInt(_) | Value::Null),
+                    "port {port}: flag 应为整数/NULL，实际 {:?}",
+                    r[1]
+                );
+            }
+            eprintln!("port {port} BOOLEAN 解码 OK: {:?}", rows.iter().map(|r| r[1].display()).collect::<Vec<_>>());
+            live.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn e2e_diff_cmp_schema_dump() {
+        // 排查工具：打印 cmp_schema 3306→3307 结构差异全量清单
+        if !e2e_enabled() {
+            eprintln!("跳过（未设置 DBFLOW_E2E）");
+            return;
+        }
+        let mut lives = Vec::new();
+        for (port, password) in [(3306u16, "dbflow-a-2026"), (3307u16, "123123")] {
+            let profile = test_profile();
+            let endpoint = ConnectEndpoint { host: "127.0.0.1".into(), port };
+            let pool = open_pool(&profile, &endpoint, Some(password)).await.expect("连接失败");
+            let live = MySqlLive::new(pool, None);
+            lives.push(live);
+        }
+        let src = lives[0].snapshot_tables("cmp_schema", None).await.expect("源快照");
+        let tgt = lives[1].snapshot_tables("cmp_schema", None).await.expect("目标快照");
+        let items = crate::compare::diff_snapshots(&src, &tgt, &crate::compare::CompareOptions::default_for_command());
+        eprintln!("== 共 {} 个差异项 ==", items.len());
+        for it in &items {
+            eprintln!(
+                "[{:?}] id={} sql={}",
+                it.action,
+                it.id,
+                it.sql.as_deref().unwrap_or("(无 SQL)")
+            );
+        }
+        for l in &lives {
+            l.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn e2e_rows_preview_dump() {
+        // 排查工具：打印 cmp_demo 各表行级预览的动作分布（含 equal 行）
+        if !e2e_enabled() {
+            eprintln!("跳过（未设置 DBFLOW_E2E）");
+            return;
+        }
+        let mut lives: Vec<std::sync::Arc<dyn LiveConnection>> = Vec::new();
+        for (port, password) in [(3306u16, "dbflow-a-2026"), (3307u16, "123123")] {
+            let profile = test_profile();
+            let endpoint = ConnectEndpoint { host: "127.0.0.1".into(), port };
+            let pool = open_pool(&profile, &endpoint, Some(password)).await.expect("连接失败");
+            lives.push(std::sync::Arc::new(MySqlLive::new(pool, None)));
+        }
+        for table in ["t_mixed_small", "t_types", "t_equal_big"] {
+            let preview = crate::datacmp::rows_preview(
+                &lives[0], &lives[1], "cmp_demo", "cmp_demo", table, 20000,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{table}: {e}"));
+            let mut n = std::collections::BTreeMap::new();
+            for r in &preview.rows {
+                *n.entry(format!("{:?}", r.action)).or_insert(0u64) += 1;
+            }
+            eprintln!("{table}: 共 {} 行, 分布 {:?}, truncated={}", preview.rows.len(), n, preview.truncated);
+        }
+        for l in &lives {
+            l.shutdown().await;
+        }
     }
 }
