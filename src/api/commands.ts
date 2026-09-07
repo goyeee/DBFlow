@@ -6,6 +6,9 @@ import type {
   CompareOptions,
   CompareTargetSpec,
   ConfigSnapshot,
+  DataCompareOptions,
+  DataSyncStatement,
+  DataTargetReport,
   DiffItem,
   ConnectionGroup,
   ConnectionProfile,
@@ -15,7 +18,12 @@ import type {
   NavicatCandidate,
   NavicatImportResult,
   NavicatImportSelection,
+  SyncSelection,
+  TableApplyResult,
   TableBrief,
+  TableDataDiff,
+  TableKeyInfo,
+  TableRowsPreview,
   TargetReport,
   TestResult,
 } from './types'
@@ -97,6 +105,52 @@ export const api = {
     }),
   applySync: (targetConnectionId: string, sqls: string[]) =>
     invoke<ApplyResultItem[]>('apply_sync', { targetConnectionId, sqls }),
+
+  // 数据对比与同步
+  listTableKeys: (connectionId: string, database: string) =>
+    invoke<TableKeyInfo[]>('list_table_keys', { connectionId, database }),
+  compareDataMulti: (
+    sourceConnectionId: string,
+    sourceDatabase: string,
+    tables: string[],
+    targets: CompareTargetSpec[],
+    options?: DataCompareOptions,
+  ) =>
+    invoke<DataTargetReport[]>('compare_data_multi', {
+      sourceConnectionId,
+      sourceDatabase,
+      tables,
+      targets,
+      options: options ?? null,
+    }),
+  getTableDiffDetail: (reportId: string, table: string) =>
+    invoke<TableDataDiff>('get_table_diff_detail', { reportId, table }),
+  getTableRowsPreview: (reportId: string, table: string, limit?: number) =>
+    invoke<TableRowsPreview>('get_table_rows_preview', { reportId, table, limit: limit ?? null }),
+  previewDataSync: (reportId: string, selections: SyncSelection[]) =>
+    invoke<DataSyncStatement[]>('preview_data_sync', { reportId, selections }),
+  applyDataSync: (targetConnectionId: string, statements: DataSyncStatement[]) =>
+    invoke<TableApplyResult[]>('apply_data_sync', { targetConnectionId, statements }),
+
+  /** 数据对比进度事件 */
+  onDataCompareProgress: (
+    cb: (e: {
+      index: number
+      total: number
+      database: string
+      table: string | null
+      phase: string
+      rowsCompared: number
+    }) => void,
+  ) =>
+    listen<{
+      index: number
+      total: number
+      database: string
+      table: string | null
+      phase: string
+      rowsCompared: number
+    }>('data-compare-progress', (e) => cb(e.payload)),
 
   /** 对比进度事件（fetch_source/fetch_target/diff），返回取消监听函数 */
   onCompareProgress: (cb: (phase: string) => void) =>

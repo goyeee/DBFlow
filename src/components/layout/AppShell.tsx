@@ -10,12 +10,14 @@ import {
 import { api } from '../../api/commands'
 import { useConnectionsStore } from '../../stores/connections'
 import { useCompareStore } from '../../stores/compare'
+import { useDataCompareStore } from '../../stores/dataCompare'
 import { useSessionStore } from '../../stores/session'
 import { useUiStore } from '../../stores/ui'
 import { ConnectionTree } from '../connection/ConnectionTree'
 import { COLOR_PRESETS } from '../connection/colors'
 import { TableColumnsView } from '../table/TableColumnsView'
 import { SyncSchemaModal } from '../compare/SyncSchemaModal'
+import { DataSyncModal } from '../datacmp/DataSyncModal'
 import { errText } from '../connection/ConnectionTree'
 
 export function AppShell() {
@@ -24,6 +26,7 @@ export function AppShell() {
   const openGroupModal = useUiStore((s) => s.openGroupModal)
   const setNavicatOpen = useUiStore((s) => s.setNavicatOpen)
   const openSyncSchema = useCompareStore((s) => s.openModal)
+  const openDataSync = useDataCompareStore((s) => s.openModal)
   const tabs = useSessionStore((s) => s.tabs)
   const activeTab = useSessionStore((s) => s.activeTab)
   const setActiveTab = useSessionStore((s) => s.setActiveTab)
@@ -130,12 +133,16 @@ export function AppShell() {
           className="menubar-menu"
           onClick={({ key }) => {
             if (key === 'schema-sync') openSyncSchema()
+            if (key === 'data-sync') openDataSync()
           }}
           items={[
             {
               key: 'tools',
               label: '工具',
-              children: [{ key: 'schema-sync', label: '结构同步…' }],
+              children: [
+                { key: 'schema-sync', label: '结构同步…' },
+                { key: 'data-sync', label: '数据同步…' },
+              ],
             },
           ]}
         />
@@ -271,6 +278,7 @@ export function AppShell() {
       </Layout>
 
       <SyncSchemaModal />
+      <DataSyncModal />
 
       {tabTip && (
         <div className="tab-tip" style={{ left: tabTip.x, top: tabTip.y }}>
