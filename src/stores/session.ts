@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { api } from '../api/commands'
-import type { ConnectResult, DatabaseBrief, TableBrief } from '../api/types'
+import type { AppErrorInfo, ColumnBrief, ConnectResult, DatabaseBrief, TableBrief } from '../api/types'
 
 export interface TableTab {
   key: string
@@ -31,6 +31,7 @@ interface SessionState {
   disconnect: (id: string) => Promise<void>
   loadDatabases: (id: string, force?: boolean) => Promise<DatabaseBrief[]>
   loadTables: (id: string, database: string, force?: boolean) => Promise<TableBrief[]>
+  describeTable: (id: string, database: string, table: string) => Promise<ColumnBrief[]>
   /** 左上角刷新：强制重拉所有已连接会话的库列表，并清空表缓存（展开时重新拉） */
   refreshConnected: () => Promise<void>
   /** 单击表：预览打开（同一时刻只有一个预览标签） */
@@ -48,8 +49,38 @@ interface SessionState {
   setError: (nodeKey: string, message: string | null) => void
 }
 
-export const useSessionStore = create<SessionState>((set, get) => ({
-  connected: {},
+export const useSessionStore = create<SessionState>((set, get) => {
+  /** 判断错误是否属于"连接已失效/超时"，值得先 forceReconnect 再重试一次 */
+  const isConnectionLostError = (e: unknown): boolean => {
+    const err = e as AppErrorInfo
+    if (!err) return false
+    if (err.code === 'not_found') return true
+    const msg = err.message || ''
+    const retryable =
+      /EOF|broken pipe|Connection reset|expected to read|network|communicating|timed out|timeout|closed/i.test(
+        msg,
+      )
+    const denied =
+      /Access denied|用户名或密码错误|认证失败|authentication|password/i.test(msg)
+    return retryable && !denied
+  }
+
+  /** 通用"断线重连一次"包装：操作失败且判断为连接丢失时，先 forceReconnect 再重试 */
+  const withReconnect = async <T>(
+    connectionId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> => {
+    try {
+      return await operation()
+    } catch (e) {
+      if (!isConnectionLostError(e)) throw e
+      await get().forceReconnect(connectionId)
+      return await operation()
+    }
+  }
+
+  return {
+    connected: {},
   connecting: {},
   errors: {},
   dbsCache: {},
@@ -106,7 +137,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   loadDatabases: async (id, force = false) => {
     const cached = get().dbsCache[id]
     if (cached && !force) return cached
-    const dbs = await api.listDatabases(id)
+    const dbs = await withReconnect(id, () => api.listDatabases(id))
     set((s) => ({ dbsCache: { ...s.dbsCache, [id]: dbs } }))
     return dbs
   },
@@ -115,9 +146,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const cacheKey = `${id}/${database}`
     const cached = get().tablesCache[cacheKey]
     if (cached && !force) return cached
-    const tables = await api.listTables(id, database)
+    const tables = await withReconnect(id, () => api.listTables(id, database))
     set((s) => ({ tablesCache: { ...s.tablesCache, [cacheKey]: tables } }))
     return tables
+  },
+
+  describeTable: async (id, database, table) => {
+    return withReconnect(id, () => api.describeTable(id, database, table))
   },
 
   refreshConnected: async () => {
@@ -228,4 +263,5 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       else delete errors[nodeKey]
       return { errors }
     }),
-}))
+  }
+})

@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
 import { Alert, Spin, Table, Tag } from 'antd'
 import type { ColumnBrief } from '../../api/types'
-import { api } from '../../api/commands'
 import type { TableTab } from '../../stores/session'
+import { useSessionStore } from '../../stores/session'
 import { errText } from '../connection/ConnectionTree'
 
 /** 双击表后打开的标签页内容：列结构信息 */
 export function TableColumnsView({ tab }: { tab: TableTab }) {
+  const describeTable = useSessionStore((s) => s.describeTable)
   const [columns, setColumns] = useState<ColumnBrief[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -17,7 +18,7 @@ export function TableColumnsView({ tab }: { tab: TableTab }) {
       setLoading(true)
       setError(null)
       try {
-        const cols = await api.describeTable(tab.connectionId, tab.database, tab.table)
+        const cols = await describeTable(tab.connectionId, tab.database, tab.table)
         if (!cancelled) setColumns(cols)
       } catch (e) {
         if (!cancelled) setError(errText(e))
@@ -29,7 +30,7 @@ export function TableColumnsView({ tab }: { tab: TableTab }) {
     return () => {
       cancelled = true
     }
-  }, [tab.connectionId, tab.database, tab.table])
+  }, [describeTable, tab.connectionId, tab.database, tab.table])
 
   return (
     <div className="table-cols-view" style={{ padding: 12 }}>
