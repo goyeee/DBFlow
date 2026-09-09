@@ -159,6 +159,9 @@ export interface DiffItem {
   sourceDesc: string | null
   targetDesc: string | null
   sql: string | null
+  /** 列变更的 ALTER 子句（不含 ALTER TABLE 前缀），如 "ADD COLUMN `x` int NULL AFTER `id`"；
+   *  同表勾选的列按此合并为一条 ALTER。表/索引/视图等独立语句为 null/缺省 */
+  sqlClause?: string | null
   /** 破坏性操作（DROP 类）→ 默认不勾选 */
   dangerous: boolean
   /** 源端该表完整建表 DDL（表在源端不存在为 null） */

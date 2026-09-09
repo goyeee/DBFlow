@@ -196,12 +196,9 @@ pub fn create_table_sql(db: &str, t: &TableDef) -> String {
     sql
 }
 
-pub fn add_column_sql(db: &str, table: &str, c: &ColumnDef, after: Option<&str>) -> String {
-    let mut sql = format!(
-        "ALTER TABLE {} ADD COLUMN {}",
-        qualified(db, table),
-        column_ddl(c)
-    );
+/// ADD 子句（不含 ALTER TABLE 前缀），供同表多个列变更合并为一条 ALTER 时复用
+pub fn add_column_clause(c: &ColumnDef, after: Option<&str>) -> String {
+    let mut sql = format!("ADD COLUMN {}", column_ddl(c));
     match after {
         Some(prev) => sql.push_str(&format!(" AFTER {}", quote_ident(prev))),
         None => sql.push_str(" FIRST"),
@@ -209,17 +206,10 @@ pub fn add_column_sql(db: &str, table: &str, c: &ColumnDef, after: Option<&str>)
     sql
 }
 
-pub fn modify_column_sql(
-    db: &str,
-    table: &str,
-    c: &ColumnDef,
-    after: Option<Option<&str>>,
-) -> String {
-    let mut sql = format!(
-        "ALTER TABLE {} MODIFY COLUMN {}",
-        qualified(db, table),
-        column_ddl(c)
-    );
+/// MODIFY 子句（不含 ALTER TABLE 前缀）。
+/// after：None = 不带位置；Some(None) = FIRST；Some(Some("col")) = AFTER col。
+pub fn modify_column_clause(c: &ColumnDef, after: Option<Option<&str>>) -> String {
+    let mut sql = format!("MODIFY COLUMN {}", column_ddl(c));
     match after {
         None => {}
         Some(None) => sql.push_str(" FIRST"),
@@ -228,46 +218,9 @@ pub fn modify_column_sql(
     sql
 }
 
-/// 合并同一表的列变更（ADD / MODIFY）为单条 ALTER TABLE。
-/// adds: (列定义, 前一列名(None 表示 FIRST))，必须按源表列顺序传入。
-/// modifies: (列定义, 位置信息)。位置信息：None = 不带位置子句；Some(None) = FIRST；Some(Some("col")) = AFTER col。
-pub fn alter_columns_sql(
-    db: &str,
-    table: &str,
-    adds: &[(ColumnDef, Option<&str>)],
-    modifies: &[(ColumnDef, Option<Option<&str>>)],
-) -> String {
-    let mut clauses: Vec<String> = Vec::new();
-    for (c, after) in adds {
-        let mut clause = format!("ADD COLUMN {}", column_ddl(c));
-        match after {
-            Some(prev) => clause.push_str(&format!(" AFTER {}", quote_ident(prev))),
-            None => clause.push_str(" FIRST"),
-        }
-        clauses.push(clause);
-    }
-    for (c, after) in modifies {
-        let mut clause = format!("MODIFY COLUMN {}", column_ddl(c));
-        match after {
-            None => {}
-            Some(None) => clause.push_str(" FIRST"),
-            Some(Some(prev)) => clause.push_str(&format!(" AFTER {}", quote_ident(prev))),
-        }
-        clauses.push(clause);
-    }
-    format!(
-        "ALTER TABLE {} {}",
-        qualified(db, table),
-        clauses.join(", ")
-    )
-}
-
-pub fn drop_column_sql(db: &str, table: &str, column: &str) -> String {
-    format!(
-        "ALTER TABLE {} DROP COLUMN {}",
-        qualified(db, table),
-        quote_ident(column)
-    )
+/// DROP 子句（不含 ALTER TABLE 前缀），供同表列变更合并为一条 ALTER 时复用
+pub fn drop_column_clause(column: &str) -> String {
+    format!("DROP COLUMN {}", quote_ident(column))
 }
 
 pub fn add_index_sql(db: &str, table: &str, i: &IndexDef) -> String {
@@ -442,9 +395,13 @@ mod tests {
 
     #[test]
     fn add_column_positioning() {
-        let sql = add_column_sql("db", "t", &c("x", "int", true, None), Some("id"));
-        assert_eq!(sql, "ALTER TABLE `db`.`t` ADD COLUMN `x` int NULL AFTER `id`");
-        let sql_first = add_column_sql("db", "t", &c("x", "int", true, None), None);
-        assert!(sql_first.ends_with("FIRST"));
+        assert_eq!(
+            add_column_clause(&c("x", "int", true, None), Some("id")),
+            "ADD COLUMN `x` int NULL AFTER `id`"
+        );
+        assert_eq!(
+            add_column_clause(&c("x", "int", true, None), None),
+            "ADD COLUMN `x` int NULL FIRST"
+        );
     }
 }

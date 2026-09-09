@@ -18,6 +18,9 @@ export function DiffTree() {
   const groupMode = useCompareStore((s) => s.groupMode)
   const selectedIds = useCompareStore((s) => s.selectedIds)
   const reportId = useCompareStore((s) => s.reportId)
+  const activeTargetKey = useCompareStore((s) => s.activeTargetKey)
+  const expandedKeys = useCompareStore((s) => s.expandedKeys)
+  const setExpandedKeys = useCompareStore((s) => s.setExpandedKeys)
   const activeTable = useCompareStore((s) => s.activeTable)
   const activeItemId = useCompareStore((s) => s.activeItemId)
   const setItemsChecked = useCompareStore((s) => s.setItemsChecked)
@@ -25,8 +28,6 @@ export function DiffTree() {
 
   const nodes = useMemo(() => buildDiffTree(report ?? [], groupMode), [report, groupMode])
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds])
-  // 分组行默认展开，表行默认收起（Navicat 同款）
-  const defaultExpandedRowKeys = useMemo(() => nodes.map((n) => n.key), [nodes])
 
   const activate = (node: DiffNode) => {
     if (node.nodeType === 'group') {
@@ -99,7 +100,9 @@ export function DiffTree() {
 
   return (
     <Table<DiffNode>
-      key={reportId}
+      // 折叠状态是 Table 内部未受控状态，且分组 key（grp:modify 等）跨目标同名；
+      // key 里带上激活目标，切换多目标标签页时强制重挂载，避免折叠状态串到其他目标
+      key={`${activeTargetKey ?? ''}:${reportId}`}
       size="small"
       rowKey="key"
       dataSource={nodes}
@@ -108,7 +111,9 @@ export function DiffTree() {
       showHeader
       className="diff-tree"
       expandable={{
-        defaultExpandedRowKeys,
+        // 受控展开：状态存于 store（多目标按目标各自保留），切换标签页回来后仍恢复
+        expandedRowKeys: expandedKeys,
+        onExpandedRowsChange: (keys) => setExpandedKeys(keys.map(String)),
         indentSize: 14,
         expandIconColumnIndex: 0,
         // 首列折叠箭头 + 勾选框，随层级一起缩进；箭头展开时旋转 90°（动效）

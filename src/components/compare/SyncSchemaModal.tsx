@@ -27,7 +27,7 @@ import {
   SwapOutlined,
   TableOutlined,
 } from '@ant-design/icons'
-import { useCompareStore, type CompareEndpoint, type CompareStep, type MultiTarget } from '../../stores/compare'
+import { useCompareStore, buildDeployStatements, type CompareEndpoint, type CompareStep, type MultiTarget } from '../../stores/compare'
 import { useConnectionsStore } from '../../stores/connections'
 import { useSessionStore } from '../../stores/session'
 import type { ConnectionProfile, DatabaseBrief } from '../../api/types'
@@ -188,6 +188,8 @@ export function SyncSchemaModal() {
         setBottomHeight(Math.max(120, Math.floor(available / 3)))
       }
     }
+    // 回到选择页（重新对比/关窗重开）后允许下次对比重新按默认高度初始化
+    if (cmp.step === 'select') initializedRef.current = false
   }, [cmp.step, cmp.report])
 
   const onResizerMouseDown = (e: React.MouseEvent) => {
@@ -198,7 +200,8 @@ export function SyncSchemaModal() {
       if (!drag) return
       const total = stepBodyRef.current?.clientHeight ?? 600
       const delta = drag.startY - ev.clientY
-      const maxH = Math.floor(total * 0.75)
+      // 上限 60%：剩余空间始终够放差异树和底部按钮，按钮位置不随拖动漂移
+      const maxH = Math.max(100, Math.floor(total * 0.6))
       const minH = 100
       setBottomHeight(Math.min(maxH, Math.max(minH, drag.startH + delta)))
     }
@@ -586,17 +589,12 @@ export function SyncSchemaModal() {
     </div>
   )
 
-  const deployItems = cmp.activeItemId
-    ? (cmp.report ?? []).filter((i) => i.id === cmp.activeItemId)
-    : cmp.activeTable
-      ? (cmp.report ?? []).filter((i) => i.table === cmp.activeTable)
-      : selected
-  const deployScript = deployItems
-    .map((i) => i.sql)
-    .filter((s): s is string => !!s)
-    .join(';\n\n')
+  // 部署脚本预览：严格以勾选的差异项为准（与第三步实际执行的口径一致）。
+  // 不能随"当前点击的表/行"变化，否则未勾选字段也会混进脚本；
+  // 同表勾选的列变更合并为一条 ALTER。
+  const deployScript = buildDeployStatements(selected).join(';\n\n')
 
-  const selectedSqls = selected.map((i) => i.sql).filter((s): s is string => !!s)
+  const selectedSqls = buildDeployStatements(selected)
   const dangerousSelected = selected.filter((i) => i.dangerous).length
 
   // 多目标模式的结果/部署页目标 Tabs：未选择库的目标不展示，标签显示连接名/库名
@@ -745,7 +743,10 @@ export function SyncSchemaModal() {
               />
             </div>
             {(cmp.report ?? []).length === 0 ? (
-              <Empty description="两端结构一致，无需同步" style={{ padding: 60 }} />
+              // 占满剩余高度的居中容器：保证底部按钮始终固定在弹窗底部
+              <div className="cmp-empty-wrap">
+                <Empty description="两端结构一致，无需同步" />
+              </div>
             ) : (
               <>
                 <div className="cmp-tree-wrap">

@@ -509,7 +509,6 @@ pub struct MergeOutcome {
     pub counts: RowCounts,
     pub rows: Vec<RowDiffData>,
     pub truncated: bool,
-    pub rows_compared: u64,
 }
 
 /// 两端有序行流的 merge-join 对比。key_idx 为键列下标。
@@ -661,7 +660,6 @@ pub async fn compare_streams<S: ChunkSource>(
         counts,
         rows,
         truncated,
-        rows_compared: compared,
     })
 }
 
@@ -1132,7 +1130,6 @@ mod tests {
         let out = merge(a.clone(), a, 2).await;
         assert_eq!(out.counts, RowCounts { insert: 0, update: 0, delete: 0, equal: 3 });
         assert!(out.rows.is_empty());
-        assert_eq!(out.rows_compared, 3);
     }
 
     #[tokio::test]
@@ -1208,7 +1205,6 @@ mod tests {
         let a: Vec<_> = (1..=10).map(|i| row(i, "x")).collect();
         let out = merge(a.clone(), a, 5).await;
         assert_eq!(out.counts, RowCounts { insert: 0, update: 0, delete: 0, equal: 10 });
-        assert_eq!(out.rows_compared, 10);
     }
 
     // ── 键类型判断 ──

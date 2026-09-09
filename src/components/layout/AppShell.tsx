@@ -1,16 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Button, Dropdown, Empty, Layout, Menu, Space, Tabs, Tooltip, message } from 'antd'
+import { Button, Dropdown, Empty, Layout, Space, Tabs, Tooltip, message } from 'antd'
 import {
   FolderAddOutlined,
   ImportOutlined,
   PlusOutlined,
   ReloadOutlined,
-  SettingOutlined,
 } from '@ant-design/icons'
-import { api } from '../../api/commands'
 import { useConnectionsStore } from '../../stores/connections'
-import { useCompareStore } from '../../stores/compare'
-import { useDataCompareStore } from '../../stores/dataCompare'
 import { useSessionStore } from '../../stores/session'
 import { useUiStore } from '../../stores/ui'
 import { ConnectionTree } from '../connection/ConnectionTree'
@@ -18,6 +14,7 @@ import { COLOR_PRESETS } from '../connection/colors'
 import { TableColumnsView } from '../table/TableColumnsView'
 import { SyncSchemaModal } from '../compare/SyncSchemaModal'
 import { DataSyncModal } from '../datacmp/DataSyncModal'
+import { TitleBar } from './TitleBar'
 import { errText } from '../connection/ConnectionTree'
 
 export function AppShell() {
@@ -25,8 +22,6 @@ export function AppShell() {
   const openForm = useUiStore((s) => s.openForm)
   const openGroupModal = useUiStore((s) => s.openGroupModal)
   const setNavicatOpen = useUiStore((s) => s.setNavicatOpen)
-  const openSyncSchema = useCompareStore((s) => s.openModal)
-  const openDataSync = useDataCompareStore((s) => s.openModal)
   const tabs = useSessionStore((s) => s.tabs)
   const activeTab = useSessionStore((s) => s.activeTab)
   const setActiveTab = useSessionStore((s) => s.setActiveTab)
@@ -36,6 +31,14 @@ export function AppShell() {
   const openTable = useSessionStore((s) => s.openTable)
   const revealInTree = useUiStore((s) => s.revealInTree)
   const connections = useConnectionsStore((s) => s.connections)
+
+  const handleRefresh = () => {
+    load().catch((e) => message.error(errText(e)))
+    useSessionStore
+      .getState()
+      .refreshConnected()
+      .catch((e) => message.error(errText(e)))
+  }
 
   // 标签悬停全称弹层：0.5s 后显示在鼠标右下方（浅色自定义弹层，不用黑底 Tooltip）
   const [tabTip, setTabTip] = useState<{ x: number; y: number; title: string } | null>(null)
@@ -126,62 +129,43 @@ export function AppShell() {
 
   return (
     <Layout className="app-shell">
-      <Layout.Header className="menubar">
-        <Menu
-          mode="horizontal"
-          selectable={false}
-          className="menubar-menu"
-          onClick={({ key }) => {
-            if (key === 'schema-sync') openSyncSchema()
-            if (key === 'data-sync') openDataSync()
-          }}
-          items={[
-            {
-              key: 'tools',
-              label: '工具',
-              children: [
-                { key: 'schema-sync', label: '结构同步…' },
-                { key: 'data-sync', label: '数据同步…' },
-              ],
-            },
-          ]}
-        />
-      </Layout.Header>
+      <TitleBar />
 
       <Layout className="app-body">
         <Layout.Sider width={280} theme="light" className="sider">
           <div className="sider-header">
-            <span className="app-title">DBFlow</span>
+            <span className="sider-header-title">连接</span>
             <Space size={2}>
-              <Tooltip title="新建连接">
-                <Button type="text" size="small" icon={<PlusOutlined />} onClick={() => openForm({ mode: 'create' })} />
+              <Tooltip title="新建连接" placement="bottom">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<PlusOutlined />}
+                  onClick={() => openForm({ mode: 'create' })}
+                />
               </Tooltip>
-              <Tooltip title="新建分组">
-                <Button type="text" size="small" icon={<FolderAddOutlined />} onClick={() => openGroupModal({ mode: 'create' })} />
+              <Tooltip title="新建分组" placement="bottom">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<FolderAddOutlined />}
+                  onClick={() => openGroupModal({ mode: 'create' })}
+                />
               </Tooltip>
-              <Tooltip title="从 Navicat 导入">
-                <Button type="text" size="small" icon={<ImportOutlined />} onClick={() => setNavicatOpen(true)} />
+              <Tooltip title="从 Navicat 导入" placement="bottom">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<ImportOutlined />}
+                  onClick={() => setNavicatOpen(true)}
+                />
               </Tooltip>
-              <Tooltip title="刷新（重载连接配置 + 已连接会话的库/表列表）">
+              <Tooltip title="刷新（重载连接配置 + 已连接会话的库/表列表）" placement="bottom">
                 <Button
                   type="text"
                   size="small"
                   icon={<ReloadOutlined />}
-                  onClick={() => {
-                    load().catch((e) => message.error(errText(e)))
-                    useSessionStore
-                      .getState()
-                      .refreshConnected()
-                      .catch((e) => message.error(errText(e)))
-                  }}
-                />
-              </Tooltip>
-              <Tooltip title="打开配置目录">
-                <Button
-                  type="text"
-                  size="small"
-                  icon={<SettingOutlined />}
-                  onClick={() => api.openConfigDir().catch((e) => message.error(errText(e)))}
+                  onClick={handleRefresh}
                 />
               </Tooltip>
             </Space>
