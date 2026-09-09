@@ -36,6 +36,8 @@ interface TargetSyncState {
   report: DiffItem[] | null
   reportId: number
   selectedIds: string[]
+  /** 结果树当前展开的行 key（分组行/表行），切换目标时各自保留 */
+  expandedKeys: string[]
   activeTable: string | null
   activeItemId: string | null
   applying: boolean
@@ -48,6 +50,7 @@ export const emptyTargetState = (): TargetSyncState => ({
   report: null,
   reportId: 0,
   selectedIds: [],
+  expandedKeys: [],
   activeTable: null,
   activeItemId: null,
   applying: false,
@@ -213,9 +216,64 @@ export function groupByAction(items: DiffItem[]): {
   return { modify, create, rename, drop }
 }
 
+/**
+ * 勾选的差异项 → 实际要执行的部署语句。
+ * 同一张表的列变更（后端按源列序连续产出，子句见 sqlClause）自动合并为一条
+ * `ALTER TABLE ... c1, c2, ...`；索引/表/视图等独立语句原样保留。
+ * 输入顺序即执行顺序（后端保证 AFTER 引用的前驱先就位），这里不重排。
+ */
+export function buildDeployStatements(items: DiffItem[]): string[] {
+  const out: string[] = []
+  let curTable: string | null = null
+  let curPrefix = ''
+  let curClauses: string[] = []
+
+  const flush = () => {
+    if (curTable === null) return
+    if (curClauses.length === 1) {
+      out.push(`${curPrefix} ${curClauses[0]}`)
+    } else {
+      out.push(`${curPrefix} ${curClauses.join(', ')}`)
+    }
+    curTable = null
+    curPrefix = ''
+    curClauses = []
+  }
+
+  for (const item of items) {
+    const clause = item.kind === 'column' ? item.sqlClause : null
+    if (item.sql && clause) {
+      // 完整语句 = 前缀 + 子句；从完整语句剥离子句得到 "ALTER TABLE `db`.`t`" 前缀
+      const prefix = item.sql.endsWith(clause)
+        ? item.sql.slice(0, item.sql.length - clause.length).trimEnd()
+        : null
+      if (prefix && item.table === curTable) {
+        curClauses.push(clause)
+        continue
+      }
+      flush()
+      curTable = item.table
+      curPrefix = prefix ?? item.sql
+      curClauses = [clause]
+    } else {
+      flush()
+      if (item.sql) out.push(item.sql)
+    }
+  }
+  flush()
+  return out
+}
+
 /** 默认勾选：非破坏性项；DROP 类留给用户手动勾 */
 function defaultSelected(items: DiffItem[]): string[] {
   return items.filter((i) => !i.dangerous).map((i) => i.id)
+}
+
+/** 结果树默认展开的行 key：分组行默认展开，表行默认收起 */
+function defaultExpandedKeys(items: DiffItem[] | null, mode: GroupMode): string[] {
+  return buildDiffTree(items ?? [], mode)
+    .filter((n) => n.nodeType === 'group')
+    .map((n) => n.key)
 }
 
 /** 把当前扁平工作态保存到指定目标 */
@@ -227,6 +285,7 @@ function stashCurrent(s: CompareState, key: string | null): Record<string, Targe
       report: s.report,
       reportId: s.reportId,
       selectedIds: s.selectedIds,
+      expandedKeys: s.expandedKeys,
       activeTable: s.activeTable,
       activeItemId: s.activeItemId,
       applying: s.applying,
@@ -244,6 +303,7 @@ function loadCurrent(s: CompareState, key: string | null): Partial<CompareState>
       report: null,
       reportId: 0,
       selectedIds: [],
+      expandedKeys: [],
       activeTable: null,
       activeItemId: null,
       applying: false,
@@ -256,6 +316,7 @@ function loadCurrent(s: CompareState, key: string | null): Partial<CompareState>
     report: st.report,
     reportId: st.reportId,
     selectedIds: st.selectedIds,
+    expandedKeys: st.expandedKeys,
     activeTable: st.activeTable,
     activeItemId: st.activeItemId,
     applying: st.applying,
@@ -300,6 +361,8 @@ interface CompareState {
   /** 每次成功对比 +1：结果页 Table 的 key，强制重置展开/勾选视觉态 */
   reportId: number
   selectedIds: string[]
+  /** 结果树当前展开的行 key（分组行/表行），单目标模式用 */
+  expandedKeys: string[]
   /** 当前选中的表名 */
   activeTable: string | null
   /** 当前选中的差异项 id */
@@ -341,6 +404,7 @@ interface CompareState {
   setGroupMode: (mode: GroupMode) => void
   toggle: (id: string) => void
   setItemsChecked: (ids: string[], checked: boolean) => void
+  setExpandedKeys: (keys: string[]) => void
   setActive: (table: string | null, itemId: string | null) => void
   setActiveTarget: (key: string) => void
   backToSelect: () => void
@@ -371,6 +435,7 @@ export const useCompareStore = create<CompareState>((set, get) => ({
   report: null,
   reportId: 0,
   selectedIds: [],
+  expandedKeys: [],
   activeTable: null,
   activeItemId: null,
   groupMode: 'action',
@@ -456,6 +521,7 @@ export const useCompareStore = create<CompareState>((set, get) => ({
       step: 'select',
       report: null,
       selectedIds: [],
+      expandedKeys: [],
       activeTable: null,
       activeItemId: null,
       applyResults: null,
@@ -706,14 +772,14 @@ export const useCompareStore = create<CompareState>((set, get) => ({
         compareOptions,
       )
       const visible = items.filter((i) => !i.id.startsWith('tblopt:'))
-      visible.sort((a, b) =>
-        a.table === b.table ? a.id.localeCompare(b.id) : a.table.localeCompare(b.table, 'zh'),
-      )
+      // 不再前端重排：后端已按表连续产出、表内按"新增/修改(源列序)→删除→索引"产出，
+      // 该顺序就是逐条部署的安全执行顺序（AFTER 依赖的前驱先就位）；表间排序交给 buildDiffTree
       if (get().runSeq !== seq) return
       set((s) => ({
         report: visible,
         reportId: s.reportId + 1,
         selectedIds: defaultSelected(visible),
+        expandedKeys: defaultExpandedKeys(visible, s.groupMode),
         activeTable: null,
         activeItemId: null,
         step: 'diff',
@@ -763,17 +829,18 @@ export const useCompareStore = create<CompareState>((set, get) => ({
 
       // 分发结果到各目标状态（按 key 匹配，避免同连接+同库的重复目标冲突）
       const nextStates: Record<string, TargetSyncState> = {}
+      // reportId 每轮对比递增一次（各目标共用），供 DiffTree 重挂载、重置折叠状态
+      const nextReportId = get().reportId + 1
       for (const r of reports) {
         const t = readyTargets.find((x) => x.key === r.key)
         if (!t) continue
         const visible = r.items.filter((i) => !i.id.startsWith('tblopt:'))
-        visible.sort((a, b) =>
-          a.table === b.table ? a.id.localeCompare(b.id) : a.table.localeCompare(b.table, 'zh'),
-        )
+        // 保持后端顺序（表内即部署执行顺序），表间排序交给 buildDiffTree
         nextStates[t.key] = {
           report: visible,
-          reportId: 1,
+          reportId: nextReportId,
           selectedIds: defaultSelected(visible),
+          expandedKeys: defaultExpandedKeys(visible, get().groupMode),
           activeTable: null,
           activeItemId: null,
           applying: false,
@@ -793,6 +860,7 @@ export const useCompareStore = create<CompareState>((set, get) => ({
         report: st.report,
         reportId: st.reportId,
         selectedIds: st.selectedIds,
+        expandedKeys: st.expandedKeys,
         activeTable: st.activeTable,
         activeItemId: st.activeItemId,
         applying: st.applying,
@@ -809,7 +877,22 @@ export const useCompareStore = create<CompareState>((set, get) => ({
   cancelCompare: () =>
     set((s) => ({ runSeq: s.runSeq + 1, comparing: false, comparePhase: null })),
 
-  setGroupMode: (mode) => set({ groupMode: mode }),
+  setGroupMode: (mode) =>
+    set((s) => {
+      // 分组方式改变后行 key 体系随之改变：当前目标与各目标暂存都重置为新模式默认展开
+      const targetStates = { ...s.targetStates }
+      for (const k of Object.keys(targetStates)) {
+        targetStates[k] = {
+          ...targetStates[k],
+          expandedKeys: defaultExpandedKeys(targetStates[k].report, mode),
+        }
+      }
+      return {
+        groupMode: mode,
+        expandedKeys: defaultExpandedKeys(s.report, mode),
+        targetStates,
+      }
+    }),
 
   toggle: (id) =>
     set((s) => ({
@@ -827,6 +910,8 @@ export const useCompareStore = create<CompareState>((set, get) => ({
           : s.selectedIds.filter((x) => !drop.has(x)),
       }
     }),
+
+  setExpandedKeys: (keys) => set({ expandedKeys: keys }),
 
   setActive: (table, itemId) => set({ activeTable: table, activeItemId: itemId }),
 
@@ -886,10 +971,10 @@ export const useCompareStore = create<CompareState>((set, get) => ({
     }
     if (applying || !targetConnId || !report) return
 
-    const sqls = report
-      .filter((i) => selectedIds.includes(i.id))
-      .map((i) => i.sql)
-      .filter((s): s is string => !!s)
+    // 同表勾选的列变更合并为一条 ALTER，与结果页"部署脚本"预览完全一致
+    const sqls = buildDeployStatements(
+      report.filter((i) => selectedIds.includes(i.id)),
+    )
     if (sqls.length === 0) return
 
     const startedAt = Date.now()

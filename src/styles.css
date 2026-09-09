@@ -24,6 +24,17 @@ textarea,
   -webkit-user-select: text;
 }
 
+/* ═══════════════ 浅色专业风主题变量 ═══════════════ */
+:root {
+  --df-bg: #ffffff;
+  --df-surface: #f7f8fa;
+  --df-border: rgba(5, 5, 5, 0.08);
+  --df-primary: #1677ff;
+  --df-hover: rgba(0, 0, 0, 0.04);
+  --df-text: rgba(0, 0, 0, 0.88);
+  --df-text-secondary: rgba(0, 0, 0, 0.55);
+}
+
 /* 整体壳 */
 .app-shell {
   height: 100vh;
@@ -34,23 +45,70 @@ textarea,
   height: calc(100vh - 40px);
 }
 
-/* 顶部菜单栏 */
-.menubar {
+/* ═══════════════ 自定义标题栏 / 工具栏 ═══════════════ */
+.titlebar {
   height: 40px;
-  line-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
   padding: 0 12px;
-  background: #fff;
-  border-bottom: 1px solid rgba(5, 5, 5, 0.08);
+  background: var(--df-bg);
+  border-bottom: 1px solid var(--df-border);
+  user-select: none;
+  -webkit-user-select: none;
 }
 
-.menubar-menu {
-  border-bottom: none;
-  line-height: 38px;
-  background: transparent;
+[data-platform='macos'] .titlebar {
+  padding-left: 80px;
 }
+
+.titlebar-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--df-text);
+}
+
+.titlebar-logo .anticon {
+  color: var(--df-primary);
+  font-size: 18px;
+}
+
+.titlebar-logo-img {
+  width: 22px;
+  height: 22px;
+  flex: none;
+}
+
+.titlebar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.titlebar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--df-text-secondary);
+}
+
+.titlebar-btn:hover {
+  color: var(--df-text);
+  background: var(--df-hover);
+}
+
+.titlebar-btn .anticon {
+  font-size: 14px;
+}
+
+/* 顶部菜单栏（旧）已移除，保留占位注释避免误用 */
 
 .sider {
-  border-right: 1px solid rgba(5, 5, 5, 0.06);
+  border-right: 1px solid var(--df-border);
 }
 
 .sider > .ant-layout-sider-children {
@@ -62,9 +120,16 @@ textarea,
 .sider-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-  border-bottom: 1px solid rgba(5, 5, 5, 0.06);
+  height: 40px;
+  padding: 0 12px;
+  background: var(--df-surface);
+  border-bottom: 1px solid var(--df-border);
+}
+
+.sider-header-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--df-text-secondary);
 }
 
 .app-title {
@@ -519,10 +584,21 @@ textarea,
 
 .cmp-tree-wrap {
   flex: 1;
-  min-height: 240px;
+  /* 不设 min-height 下限：空间不足时本区域先收缩，底部按钮位置保持固定 */
+  min-height: 0;
   overflow: auto;
   border: 1px solid rgba(5, 5, 5, 0.08);
   border-radius: 6px;
+}
+
+/* 结果页无差异时的占位区：占满剩余空间并居中，保证底部按钮固定在弹窗底部 */
+.cmp-empty-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 /* 上下两区域之间的可拖拽分隔条 */

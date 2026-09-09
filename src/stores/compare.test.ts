@@ -15,7 +15,7 @@ vi.mock('../api/commands', () => ({
 }))
 
 import { api } from '../api/commands'
-import { buildDiffTree, collectItemIds, emptyTargetState, groupByAction, useCompareStore } from './compare'
+import { buildDeployStatements, buildDiffTree, collectItemIds, emptyTargetState, groupByAction, useCompareStore } from './compare'
 
 const mockCompare = vi.mocked(api.compareSchema)
 const mockCompareMulti = vi.mocked(api.compareSchemaMulti)
@@ -392,6 +392,53 @@ describe('多目标结构同步', () => {
     expect(useCompareStore.getState().selectedIds).toEqual(['a'])
   })
 
+  it('切换激活目标时树的展开状态各自保留', () => {
+    const k1State = {
+      ...emptyTargetState(),
+      report: [item('a', 'modify')],
+      expandedKeys: ['grp:modify', 'tbn:modify:t1'],
+    }
+    const k2State = {
+      ...emptyTargetState(),
+      report: [item('b', 'modify')],
+      expandedKeys: ['grp:modify'],
+    }
+    useCompareStore.setState({
+      mode: 'multi',
+      targets: [
+        { key: 'k1', connectionId: 'c2', database: 'db2', dbs: [], loadingDbs: false },
+        { key: 'k2', connectionId: 'c3', database: 'db3', dbs: [], loadingDbs: false },
+      ],
+      activeTargetKey: 'k1',
+      targetStates: { k1: k1State, k2: k2State },
+      ...k1State,
+    })
+    useCompareStore.getState().setActiveTarget('k2')
+    expect(useCompareStore.getState().expandedKeys).toEqual(['grp:modify'])
+    // 切回 k1：用户展开过的表明细行仍保持展开
+    useCompareStore.getState().setActiveTarget('k1')
+    expect(useCompareStore.getState().expandedKeys).toEqual(['grp:modify', 'tbn:modify:t1'])
+  })
+
+  it('runCompareMulti 后默认展开分组行、收起表明细行', async () => {
+    useCompareStore.setState({
+      modalOpen: true,
+      mode: 'multi',
+      source: { connectionId: 'c1', database: 'db1' },
+      targets: [
+        { key: 'k1', connectionId: 'c2', database: 'db2', dbs: [], loadingDbs: false },
+      ],
+      activeTargetKey: 'k1',
+    })
+    mockCompareMulti.mockResolvedValue([
+      { key: 'k1', connectionId: 'c2', database: 'db2', items: [item('col:t1.f', 'modify')], error: null },
+    ])
+    await useCompareStore.getState().runCompareMulti()
+    const s = useCompareStore.getState()
+    expect(s.expandedKeys).toEqual(['grp:modify'])
+    expect(s.targetStates['k1'].expandedKeys).toEqual(['grp:modify'])
+  })
+
   it('多目标部署按激活目标连接执行', async () => {
     useCompareStore.setState({
       mode: 'multi',
@@ -531,5 +578,94 @@ describe('buildDiffTree 结果页树构建', () => {
     expect(collectItemIds(nodes).sort()).toEqual(
       ['tblopt:tA', 'col:tA:c1', 'idx:tA:i1', 'tbl:tB', 'tbl:tC', 'col:tD:c9'].sort(),
     )
+  })
+})
+
+describe('buildDeployStatements 部署语句合并', () => {
+  const col = (
+    id: string,
+    table: string,
+    clause: string,
+    action: DiffItem['action'] = 'modify',
+  ): DiffItem => ({
+    id,
+    kind: 'column',
+    action,
+    table,
+    name: id.split(':').pop()!,
+    sourceDesc: null,
+    targetDesc: null,
+    sql: `ALTER TABLE \`db\`.\`${table}\` ${clause}`,
+    sqlClause: clause,
+    dangerous: action === 'drop',
+    sourceDdl: null,
+    targetDdl: null,
+  })
+
+  it('同表多个列变更合并为一条 ALTER，子句按输入顺序用逗号连接', () => {
+    const statements = buildDeployStatements([
+      col('col:t:a', 't', "MODIFY COLUMN `a` int NOT NULL"),
+      col('col:t:b', 't', "ADD COLUMN `b` int NULL AFTER `a`", 'create'),
+      col('col:t:c', 't', "DROP COLUMN `c`", 'drop'),
+    ])
+    expect(statements).toEqual([
+      "ALTER TABLE `db`.`t` MODIFY COLUMN `a` int NOT NULL, ADD COLUMN `b` int NULL AFTER `a`, DROP COLUMN `c`",
+    ])
+  })
+
+  it('单列变更就是一条独立 ALTER，不带多余逗号', () => {
+    const statements = buildDeployStatements([col('col:t:a', 't', "MODIFY COLUMN `a` int NOT NULL")])
+    expect(statements).toEqual(["ALTER TABLE `db`.`t` MODIFY COLUMN `a` int NOT NULL"])
+  })
+
+  it('不同表的列变更各自成条；索引/表级语句独立不合并', () => {
+    const idx: DiffItem = {
+      id: 'idx:t:ix', kind: 'index', action: 'create', table: 't', name: 'ix',
+      sourceDesc: null, targetDesc: null,
+      sql: 'ALTER TABLE `db`.`t` ADD INDEX `ix` (`a`)', dangerous: false,
+      sourceDdl: null, targetDdl: null,
+    }
+    const createTable: DiffItem = {
+      id: 'tbl:u', kind: 'table', action: 'create', table: 'u', name: 'u',
+      sourceDesc: null, targetDesc: null, sql: 'CREATE TABLE `db`.`u` (...)', dangerous: false,
+      sourceDdl: null, targetDdl: null,
+    }
+    const statements = buildDeployStatements([
+      col('col:t:a', 't', "MODIFY COLUMN `a` int NOT NULL"),
+      idx,
+      col('col:t:b', 't', "MODIFY COLUMN `b` int NOT NULL"), // 被索引隔开：保守地另起一条
+      col('col:u:x', 'u', "ADD COLUMN `x` int NULL FIRST", 'create'),
+      createTable,
+    ])
+    expect(statements).toEqual([
+      "ALTER TABLE `db`.`t` MODIFY COLUMN `a` int NOT NULL",
+      'ALTER TABLE `db`.`t` ADD INDEX `ix` (`a`)',
+      "ALTER TABLE `db`.`t` MODIFY COLUMN `b` int NOT NULL",
+      "ALTER TABLE `db`.`u` ADD COLUMN `x` int NULL FIRST",
+      'CREATE TABLE `db`.`u` (...)',
+    ])
+  })
+
+  it('只勾选部分字段时，合并后的 ALTER 只包含勾选字段', () => {
+    const all = [
+      col('col:t:a', 't', "MODIFY COLUMN `a` int NOT NULL"),
+      col('col:t:b', 't', "ADD COLUMN `b` int NULL AFTER `a`", 'create'),
+      col('col:t:c', 't', "MODIFY COLUMN `c` varchar(64) NULL"),
+    ]
+    const selected = [all[0], all[2]]
+    expect(buildDeployStatements(selected)).toEqual([
+      "ALTER TABLE `db`.`t` MODIFY COLUMN `a` int NOT NULL, MODIFY COLUMN `c` varchar(64) NULL",
+    ])
+  })
+
+  it('旧数据缺 sqlClause 时回退为整条 sql 独立执行', () => {
+    const legacy: DiffItem = {
+      ...col('col:t:a', 't', 'UNUSED'),
+      sqlClause: null,
+      sql: 'ALTER TABLE `db`.`t` MODIFY COLUMN `a` int NOT NULL',
+    }
+    expect(buildDeployStatements([legacy])).toEqual([
+      'ALTER TABLE `db`.`t` MODIFY COLUMN `a` int NOT NULL',
+    ])
   })
 })

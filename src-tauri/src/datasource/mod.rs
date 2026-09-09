@@ -126,14 +126,16 @@ pub struct ViewDef {
 }
 
 /// COLUMN_DEFAULT 跨版本归一化：
-/// - 显式 DEFAULT NULL 与无默认（两版本呈现不一致）统一为 None
+/// - SQL NULL（无默认值）与字符串 "NULL"（显式 DEFAULT NULL）统一为 None
 /// - CURRENT_TIMESTAMP / current_timestamp() / now() 统一为 current_timestamp
-/// - 去除首尾空白；空串视为 None
+/// - 空字符串保留为 Some("")——DEFAULT '' 是有效默认值，与无默认值语义不同，
+///   归一化成 None 会导致删除/新增 DEFAULT '' 检测不到差异
 pub fn normalize_default(v: Option<String>) -> Option<String> {
-    let v = v?.trim().to_string();
-    if v.is_empty() || v.eq_ignore_ascii_case("null") {
+    let v = v?;
+    if v.eq_ignore_ascii_case("null") {
         return None;
     }
+    let v = v.trim().to_string();
     let lower = v.to_ascii_lowercase();
     if lower == "current_timestamp()" || lower == "current_timestamp" || lower == "now()" {
         return Some("current_timestamp".to_string());
@@ -197,6 +199,8 @@ mod normalize_tests {
         assert_eq!(normalize_default(Some("current_timestamp()".into())).as_deref(), Some("current_timestamp"));
         assert_eq!(normalize_default(Some("NULL".into())), None);
         assert_eq!(normalize_default(None), None);
+        // DEFAULT '' 必须与"无默认值"区分（空串是有效默认值）
+        assert_eq!(normalize_default(Some("".into())).as_deref(), Some(""));
         assert_eq!(
             normalize_extra(Some("DEFAULT_GENERATED on update CURRENT_TIMESTAMP".into())),
             "on update current_timestamp"

@@ -6,7 +6,10 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::datasource::{ColumnDef, IndexDef, SchemaSnapshot, TableDef, ViewDef};
-use sqlgen::{create_table_sql, describe_column, describe_index, describe_table_options};
+use sqlgen::{
+    add_column_clause, create_table_sql, describe_column, describe_index, describe_table_options,
+    drop_column_clause, modify_column_clause, qualified,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -64,6 +67,11 @@ pub struct DiffItem {
     pub target_desc: Option<String>,
     /// 在目标端执行的 SQL
     pub sql: Option<String>,
+    /// 列变更的 ALTER 子句（不含 "ALTER TABLE 库.表" 前缀），
+    /// 如 "ADD COLUMN `x` int NULL AFTER `id`"。前端把同表勾选的列子句
+    /// 合并为一条 ALTER；None 表示该项不参与列合并（表/索引/视图等独立语句）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sql_clause: Option<String>,
     /// 破坏性操作（DROP 表/列/索引）→ 前端红色标注 + 默认不勾选
     pub dangerous: bool,
     /// 源端该表完整建表 DDL（DDL 对比视图用；表在源端不存在时为 None）
@@ -174,6 +182,7 @@ fn table_rename(db: &str, s: &TableDef, t: &TableDef, src_ddl: &str, tgt_ddl: &s
             sqlgen::qualified(db, &t.name),
             sqlgen::qualified(db, &s.name)
         )),
+        sql_clause: None,
         dangerous: false,
         source_ddl: Some(src_ddl.to_string()),
         target_ddl: Some(tgt_ddl.to_string()),
@@ -190,6 +199,7 @@ fn table_create(db: &str, s: &TableDef, src_ddl: &str) -> DiffItem {
         source_desc: Some(describe_table_options(s)),
         target_desc: None,
         sql: Some(create_table_sql(db, s)),
+        sql_clause: None,
         dangerous: false,
         source_ddl: Some(src_ddl.to_string()),
         target_ddl: None,
@@ -206,6 +216,7 @@ fn table_drop(db: &str, t: &TableDef, tgt_ddl: &str) -> DiffItem {
         source_desc: None,
         target_desc: Some(format!("{} 个列，待删除", t.columns.len())),
         sql: Some(format!("DROP TABLE {}", sqlgen::qualified(db, &t.name))),
+        sql_clause: None,
         dangerous: true,
         source_ddl: None,
         target_ddl: Some(tgt_ddl.to_string()),
@@ -223,11 +234,11 @@ fn diff_table(
     let mut items = Vec::new();
     let mk = |id: String, kind: DiffKind, action: DiffAction, name: String,
               source_desc: Option<String>, target_desc: Option<String>,
-              sql: Option<String>, dangerous: bool| DiffItem {
+              sql: Option<String>, sql_clause: Option<String>, dangerous: bool| DiffItem {
         id, kind, action,
         table: s.name.clone(),
         name,
-        source_desc, target_desc, sql, dangerous,
+        source_desc, target_desc, sql, sql_clause, dangerous,
         source_ddl: Some(src_ddl.to_string()),
         target_ddl: Some(tgt_ddl.to_string()),
     };
@@ -264,182 +275,113 @@ fn diff_table(
             Some(describe_table_options(s)),
             Some(describe_table_options(t)),
             Some(alter),
+            None,
             false,
         ));
     }
 
-    // 列：按源表列顺序遍历，保证合并 ALTER 时 ADD/MODIFY ... AFTER 的位置正确
+    // ── 列差异：每个字段一条独立 DiffItem（可单独勾选/部署）──
     let src_cols: BTreeMap<&str, &ColumnDef> =
         s.columns.iter().map(|c| (c.name.as_str(), c)).collect();
     let tgt_cols: BTreeMap<&str, &ColumnDef> =
         t.columns.iter().map(|c| (c.name.as_str(), c)).collect();
 
-    let mut adds: Vec<(&ColumnDef, Option<String>)> = Vec::new();
-    let mut type_modifies: Vec<(&ColumnDef, &ColumnDef)> = Vec::new();
-    for (pos, sc) in s.columns.iter().enumerate() {
-        match tgt_cols.get(sc.name.as_str()) {
-            None => {
-                let after = if pos == 0 {
-                    None
-                } else {
-                    Some(s.columns[pos - 1].name.clone())
-                };
-                adds.push((sc, after));
-            }
-            Some(tc) if !cols_equal(sc, tc) => {
-                type_modifies.push((sc, tc));
-            }
-            _ => {}
-        }
-    }
-
-    // 位置变更检测：从第一个顺序不对的位置起，后续所有已存在列都重排。
-    // ordinal 全 0 表示快照未提供可靠位置信息（如类型转换兜底失败），直接跳过位置检测。
-    let ordinals_reliable = t.columns.iter().all(|c| c.ordinal > 0);
-    let mut seen_mismatch = false;
-    let mut position_change_names: Vec<String> = Vec::new();
-    if ordinals_reliable {
-        for (pos, sc) in s.columns.iter().enumerate() {
-            if !tgt_cols.contains_key(sc.name.as_str()) {
-                continue;
-            }
-            let desired_prev = if pos == 0 {
-                None
-            } else {
-                Some(s.columns[pos - 1].name.as_str())
-            };
-            let tc = tgt_cols.get(sc.name.as_str()).unwrap();
-            let actual_prev = if tc.ordinal <= 1 {
-                None
-            } else {
-                t.columns
-                    .iter()
-                    .find(|c| c.ordinal == tc.ordinal - 1)
-                    .map(|c| c.name.as_str())
-            };
-            if desired_prev != actual_prev {
-                seen_mismatch = true;
-            }
-            if seen_mismatch {
-                position_change_names.push(sc.name.clone());
-            }
-        }
-    }
-    let position_set: std::collections::HashSet<&str> =
-        position_change_names.iter().map(|n| n.as_str()).collect();
-
-    // 组装 modifies（类型修改 + 位置变更），按源表列顺序，附带 AFTER/FIRST
-    let mut modifies: Vec<(&ColumnDef, Option<Option<String>>)> = Vec::new();
-    let mut last_source_name: Option<String> = None;
-    for sc in &s.columns {
-        let is_type_modify = type_modifies.iter().any(|(x, _)| x.name == sc.name);
-        let is_position_change = position_set.contains(sc.name.as_str());
-        if is_type_modify || is_position_change {
-            let after = if is_position_change {
-                Some(last_source_name.clone())
-            } else {
-                None
-            };
-            modifies.push((sc, after));
-        }
-        last_source_name = Some(sc.name.clone());
-    }
-
-    let drops: Vec<&ColumnDef> = t
+    // 位置规划的模拟起点：目标列剔除"待删除列"后的当前列序。
+    // 快照按 ORDINAL_POSITION 返回，Vec 顺序就是真实物理列序。
+    let mut cur_order: Vec<&str> = t
         .columns
         .iter()
-        .filter(|tc| !src_cols.contains_key(tc.name.as_str()))
+        .filter(|tc| src_cols.contains_key(tc.name.as_str()))
+        .map(|tc| tc.name.as_str())
         .collect();
 
-    let position_only_count = modifies.len() - type_modifies.len();
-    let n_combined = adds.len() + type_modifies.len() + position_only_count;
-    if n_combined > 1 {
-        let add_specs: Vec<(ColumnDef, Option<&str>)> = adds
-            .iter()
-            .map(|(c, after)| ((*c).clone(), after.as_deref()))
-            .collect();
-        let modify_specs: Vec<(ColumnDef, Option<Option<&str>>)> = modifies
-            .iter()
-            .map(|(c, after)| {
-                let a = after.as_ref().map(|o| o.as_deref());
-                ((*c).clone(), a)
-            })
-            .collect();
-        let source_desc = adds
-            .iter()
-            .map(|(c, _)| format!("+{}: {}", c.name, describe_column(c)))
-            .chain(
-                modifies
-                    .iter()
-                    .map(|(sc, _)| format!("~{}: {}", sc.name, describe_column(sc))),
-            )
-            .collect::<Vec<_>>()
-            .join("; ");
-        let target_desc = adds
-            .iter()
-            .map(|(c, _)| format!("+{}: {}", c.name, describe_column(c)))
-            .chain(
-                modifies
-                    .iter()
-                    .map(|(sc, _)| {
-                        let tc = tgt_cols.get(sc.name.as_str()).unwrap();
-                        format!("~{}: {}", sc.name, describe_column(tc))
-                    }),
-            )
-            .collect::<Vec<_>>()
-            .join("; ");
-        items.push(mk(
-            format!("col:{}:__combined__", s.name),
-            DiffKind::Column,
-            DiffAction::Modify,
-            format!("{} 个列变更", n_combined),
-            Some(source_desc),
-            Some(target_desc),
-            Some(sqlgen::alter_columns_sql(
-                db, &s.name, &add_specs, &modify_specs,
-            )),
-            false,
-        ));
-    } else {
-        for (sc, after) in &adds {
-            items.push(mk(
-                format!("col:{}:{}", s.name, sc.name),
-                DiffKind::Column,
-                DiffAction::Create,
-                sc.name.clone(),
-                Some(describe_column(sc)),
-                None,
-                Some(sqlgen::add_column_sql(db, &s.name, sc, after.as_deref())),
-                false,
-            ));
+    // 按源列顺序逐个"固定"到前驱之后：
+    // - 目标缺失的列 → ADD（带 AFTER/FIRST，按源顺序产出，AFTER 引用的前驱一定已就位）
+    // - 两端都有的列 → 仅当当前没有紧跟前驱时才 MODIFY 移动；类型变化时 MODIFY 新定义。
+    //   这是贪心的最长公共子序列：天然在位的列保持不动，移动数量最小——
+    //   中间插入一个新列不会把其后的列误判成变更，纯换位只动真正错位的列。
+    let mut prev: Option<&str> = None;
+    for sc in &s.columns {
+        match tgt_cols.get(sc.name.as_str()) {
+            None => {
+                let after = prev.map(str::to_string);
+                let clause = add_column_clause(sc, after.as_deref());
+                items.push(mk(
+                    format!("col:{}:{}", s.name, sc.name),
+                    DiffKind::Column,
+                    DiffAction::Create,
+                    sc.name.clone(),
+                    Some(describe_column(sc)),
+                    None,
+                    Some(format!("ALTER TABLE {} {}", qualified(db, &s.name), clause)),
+                    Some(clause),
+                    false,
+                ));
+                match prev {
+                    Some(p) => {
+                        let i = cur_order.iter().position(|n| *n == p).unwrap();
+                        cur_order.insert(i + 1, sc.name.as_str());
+                    }
+                    None => cur_order.insert(0, sc.name.as_str()),
+                }
+            }
+            Some(tc) => {
+                let type_changed = !cols_equal(sc, tc);
+                let in_place = match prev {
+                    None => cur_order.first() == Some(&sc.name.as_str()),
+                    Some(p) => cur_order
+                        .iter()
+                        .position(|n| *n == sc.name.as_str())
+                        .is_some_and(|i| i > 0 && cur_order[i - 1] == p),
+                };
+                if type_changed || !in_place {
+                    // 已在位 → MODIFY 不带位置子句；错位 → 同一条 MODIFY 带上 AFTER/FIRST
+                    let after: Option<Option<&str>> =
+                        if in_place { None } else { Some(prev) };
+                    let clause = modify_column_clause(sc, after);
+                    items.push(mk(
+                        format!("col:{}:{}", s.name, sc.name),
+                        DiffKind::Column,
+                        DiffAction::Modify,
+                        sc.name.clone(),
+                        Some(describe_column(sc)),
+                        Some(describe_column(tc)),
+                        Some(format!("ALTER TABLE {} {}", qualified(db, &s.name), clause)),
+                        Some(clause),
+                        false,
+                    ));
+                }
+                if !in_place {
+                    cur_order.retain(|n| *n != sc.name.as_str());
+                    match prev {
+                        Some(p) => {
+                            let i = cur_order.iter().position(|n| *n == p).unwrap();
+                            cur_order.insert(i + 1, sc.name.as_str());
+                        }
+                        None => cur_order.insert(0, sc.name.as_str()),
+                    }
+                }
+            }
         }
-        for (sc, after) in &modifies {
-            let after_ref = after.as_ref().map(|o| o.as_deref());
-            let tc = tgt_cols.get(sc.name.as_str()).unwrap();
-            items.push(mk(
-                format!("col:{}:{}", s.name, sc.name),
-                DiffKind::Column,
-                DiffAction::Modify,
-                sc.name.clone(),
-                Some(describe_column(sc)),
-                Some(describe_column(tc)),
-                Some(sqlgen::modify_column_sql(db, &s.name, sc, after_ref)),
-                false,
-            ));
-        }
+        prev = Some(sc.name.as_str());
     }
 
-    for tc in &drops {
-        items.push(mk(
-            format!("col:{}:{}", s.name, tc.name),
-            DiffKind::Column,
-            DiffAction::Drop,
-            tc.name.clone(),
-            None,
-            Some(describe_column(tc)),
-            Some(sqlgen::drop_column_sql(db, &s.name, &tc.name)),
-            true,
-        ));
+    // 删除列：目标端独有，逐条独立 DROP（破坏性，前端默认不勾选）
+    for tc in &t.columns {
+        if !src_cols.contains_key(tc.name.as_str()) {
+            let clause = drop_column_clause(&tc.name);
+            items.push(mk(
+                format!("col:{}:{}", s.name, tc.name),
+                DiffKind::Column,
+                DiffAction::Drop,
+                tc.name.clone(),
+                None,
+                Some(describe_column(tc)),
+                Some(format!("ALTER TABLE {} {}", qualified(db, &s.name), clause)),
+                Some(clause),
+                true,
+            ));
+        }
     }
 
     // 索引（可按配置跳过）
@@ -459,6 +401,7 @@ fn diff_table(
                     Some(describe_index(si)),
                     None,
                     Some(sqlgen::add_index_sql(db, &s.name, si)),
+                    None,
                     false,
                 )),
                 Some(ti) if si != ti => {
@@ -474,6 +417,7 @@ fn diff_table(
                         Some(describe_index(si)),
                         Some(describe_index(ti)),
                         Some(sqlgen::rebuild_index_sql(db, &s.name, si, auto_inc_col)),
+                        None,
                         false,
                     ))
                 }
@@ -490,6 +434,7 @@ fn diff_table(
                     None,
                     Some(describe_index(ti)),
                     Some(sqlgen::drop_index_sql(db, &s.name, ti)),
+                    None,
                     true,
                 ));
             }
@@ -529,6 +474,7 @@ fn diff_views(src: &[ViewDef], tgt: &[ViewDef], db: &str) -> Vec<DiffItem> {
                 source_desc: Some(sqlgen::describe_view(sv)),
                 target_desc: None,
                 sql: Some(sqlgen::create_view_sql(db, sv)),
+                sql_clause: None,
                 dangerous: false,
                 source_ddl: Some(sqlgen::create_view_sql(db, sv)),
                 target_ddl: None,
@@ -545,6 +491,7 @@ fn diff_views(src: &[ViewDef], tgt: &[ViewDef], db: &str) -> Vec<DiffItem> {
                     source_desc: Some(sqlgen::describe_view(sv)),
                     target_desc: Some(sqlgen::describe_view(tv)),
                     sql: Some(sqlgen::alter_view_sql(db, sv)),
+                    sql_clause: None,
                     dangerous: false,
                     source_ddl: Some(source_ddl),
                     target_ddl: Some(target_ddl),
@@ -564,6 +511,7 @@ fn diff_views(src: &[ViewDef], tgt: &[ViewDef], db: &str) -> Vec<DiffItem> {
                 source_desc: None,
                 target_desc: Some(sqlgen::describe_view(tv)),
                 sql: Some(sqlgen::drop_view_sql(db, tv)),
+                sql_clause: None,
                 dangerous: true,
                 source_ddl: None,
                 target_ddl: Some(sqlgen::create_view_sql(db, tv)),
@@ -701,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn column_add_modify_drop() {
+    fn column_add_modify_drop_are_separate_items() {
         let src = snap(
             "src",
             vec![table(
@@ -727,26 +675,41 @@ mod tests {
             )],
         );
         let items = diff(&src, &tgt);
-        // ADD + MODIFY 合并为一个 DiffItem；DROP 单独
-        assert_eq!(items.len(), 2, "{items:?}");
+        // 每个字段一条独立 DiffItem，按源列顺序：name 修改、remark 新增、legacy 删除
+        assert_eq!(items.len(), 3, "{items:?}");
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["col:t:name", "col:t:remark", "col:t:legacy"]);
 
-        let combined = items.iter().find(|i| i.id == "col:t:__combined__").unwrap();
-        assert_eq!(combined.action, DiffAction::Modify);
-        let sql = combined.sql.as_deref().unwrap();
-        assert!(sql.starts_with("ALTER TABLE `tgt`.`t`"), "{sql}");
-        assert!(sql.contains("ADD COLUMN `remark` text NULL AFTER `name`"), "{sql}");
-        assert!(sql.contains("MODIFY COLUMN `name` varchar(255) NOT NULL"), "{sql}");
+        let modify = &items[0];
+        assert_eq!(modify.action, DiffAction::Modify);
+        let modify_sql = modify.sql.as_deref().unwrap();
+        assert!(modify_sql.starts_with("ALTER TABLE `tgt`.`t` MODIFY COLUMN"), "{modify_sql}");
+        assert!(modify_sql.contains("varchar(255)"), "{modify_sql}");
+        // 仅类型变化、位置未动 → 不带 AFTER/FIRST
+        assert!(!modify_sql.contains("AFTER") && !modify_sql.contains("FIRST"), "{modify_sql}");
 
-        let drop = items.iter().find(|i| i.id == "col:t:legacy").unwrap();
+        let add = &items[1];
+        assert_eq!(add.action, DiffAction::Create);
+        assert_eq!(
+            add.sql.as_deref(),
+            Some("ALTER TABLE `tgt`.`t` ADD COLUMN `remark` text NULL AFTER `name`")
+        );
+        // 子句不含表前缀，供前端与同表其他勾选项合并为一条 ALTER
+        assert_eq!(
+            add.sql_clause.as_deref(),
+            Some("ADD COLUMN `remark` text NULL AFTER `name`")
+        );
+
+        let drop = &items[2];
         assert_eq!(drop.action, DiffAction::Drop);
         assert!(drop.dangerous);
-        assert!(drop.sql.as_deref().unwrap().contains("DROP COLUMN"));
+        assert_eq!(drop.sql.as_deref(), Some("ALTER TABLE `tgt`.`t` DROP COLUMN `legacy`"));
     }
 
     #[test]
-    fn multiple_columns_merged_into_single_alter() {
+    fn multiple_added_columns_each_become_independent_items() {
         // 源表：id, a, b, c；目标表：id
-        // 新增 a/b/c 三个列应合并为一条 ALTER TABLE，且 AFTER 指向源中前一列
+        // 每个新增列都是独立项、独立 ALTER，AFTER 指向源中前一列，按源顺序逐条执行即到位
         let src = snap(
             "src",
             vec![table(
@@ -762,29 +725,36 @@ mod tests {
         );
         let tgt = snap("tgt", vec![table("t", vec![col("id", "int", false)], vec![])]);
         let items = diff(&src, &tgt);
-        assert_eq!(items.len(), 1);
-        let combined = &items[0];
-        assert_eq!(combined.id, "col:t:__combined__");
-        let sql = combined.sql.as_deref().unwrap();
-        assert!(sql.starts_with("ALTER TABLE `tgt`.`t`"));
-        // 顺序：a 在 id 后，b 在 a 后，c 在 b 后
-        assert!(sql.contains("ADD COLUMN `a` int NULL AFTER `id`"), "{sql}");
-        assert!(sql.contains("ADD COLUMN `b` int NULL AFTER `a`"), "{sql}");
-        assert!(sql.contains("ADD COLUMN `c` int NULL AFTER `b`"), "{sql}");
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["col:t:a", "col:t:b", "col:t:c"], "{items:?}");
+        assert!(items.iter().all(|i| i.action == DiffAction::Create));
+        assert_eq!(
+            items[0].sql.as_deref(),
+            Some("ALTER TABLE `tgt`.`t` ADD COLUMN `a` int NULL AFTER `id`")
+        );
+        assert_eq!(
+            items[1].sql.as_deref(),
+            Some("ALTER TABLE `tgt`.`t` ADD COLUMN `b` int NULL AFTER `a`")
+        );
+        assert_eq!(
+            items[2].sql.as_deref(),
+            Some("ALTER TABLE `tgt`.`t` ADD COLUMN `c` int NULL AFTER `b`")
+        );
     }
 
     #[test]
-    fn combined_column_descriptions_use_source_and_target_forms() {
-        // 源：id, name varchar(255)；目标：id, name varchar(64)
-        // 再加一个新增列 remark → 合并为一条 ALTER
+    fn inserted_column_does_not_flag_following_columns() {
+        // 用户反馈：中间新增一列时，它后面的列不应被当作"位置变更"。
+        // 源：id, x, y, z；目标：id, y, z → 只应有 ADD x 一条，y/z 天然在位
         let src = snap(
             "src",
             vec![table(
                 "t",
                 vec![
                     col("id", "int", false),
-                    col("name", "varchar(255)", false),
-                    col("remark", "text", true),
+                    col("x", "int", true),
+                    col("y", "int", true),
+                    col("z", "int", true),
                 ],
                 vec![],
             )],
@@ -793,20 +763,110 @@ mod tests {
             "tgt",
             vec![table(
                 "t",
-                vec![col("id", "int", false), col("name", "varchar(64)", false)],
+                vec![col("id", "int", false), col("y", "int", true), col("z", "int", true)],
                 vec![],
             )],
         );
         let items = diff(&src, &tgt);
-        let combined = items.iter().find(|i| i.id == "col:t:__combined__").unwrap();
-        let sd = combined.source_desc.as_deref().unwrap();
-        let td = combined.target_desc.as_deref().unwrap();
-        // source_desc 应描述源端形态：新增列 + 修改后列
-        assert!(sd.contains("+remark: text NULL"), "source_desc: {sd}");
-        assert!(sd.contains("~name: varchar(255) NOT NULL"), "source_desc: {sd}");
-        // target_desc 应描述目标端形态：新增列 + 修改前列
-        assert!(td.contains("+remark: text NULL"), "target_desc: {td}");
-        assert!(td.contains("~name: varchar(64) NOT NULL"), "target_desc: {td}");
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["col:t:x"], "{items:?}");
+        assert_eq!(
+            items[0].sql.as_deref(),
+            Some("ALTER TABLE `tgt`.`t` ADD COLUMN `x` int NULL AFTER `id`")
+        );
+    }
+
+    #[test]
+    fn each_type_modified_column_is_independently_selectable() {
+        // 两列类型同时变化 → 两条独立 Modify，各自带完整列定义
+        let col_v = |name: &str, len: &str| col(name, &format!("varchar({len})"), false);
+        let src = snap(
+            "src",
+            vec![table(
+                "t",
+                vec![col("id", "int", false), col_v("a", "20"), col_v("b", "50")],
+                vec![],
+            )],
+        );
+        let tgt = snap(
+            "tgt",
+            vec![table(
+                "t",
+                vec![col("id", "int", false), col_v("a", "60"), col_v("b", "80")],
+                vec![],
+            )],
+        );
+        let items = diff(&src, &tgt);
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["col:t:a", "col:t:b"], "{items:?}");
+        assert!(items.iter().all(|i| i.action == DiffAction::Modify));
+        assert!(items[0].sql.as_deref().unwrap().contains("varchar(20)"));
+        assert!(items[1].sql.as_deref().unwrap().contains("varchar(50)"));
+    }
+
+    #[test]
+    fn empty_string_default_add_and_remove_detected() {
+        // 源：name DEFAULT ''；目标：name 无默认值 → 应产出 Modify，SQL 带 DEFAULT ''
+        let col_with_default = |default: Option<&str>| ColumnDef {
+            name: "name".into(),
+            data_type: "varchar(64)".into(),
+            nullable: false,
+            default: default.map(str::to_string),
+            ..Default::default()
+        };
+        let src = snap(
+            "src",
+            vec![table("t", vec![col("id", "int", false), col_with_default(Some(""))], vec![])],
+        );
+        let tgt = snap(
+            "tgt",
+            vec![table("t", vec![col("id", "int", false), col_with_default(None)], vec![])],
+        );
+        let items = diff(&src, &tgt);
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].id, "col:t:name");
+        let sql = items[0].sql.as_deref().unwrap();
+        assert!(sql.contains("MODIFY COLUMN `name` varchar(64) NOT NULL DEFAULT ''"), "{sql}");
+
+        // 反向：源无默认值、目标 DEFAULT '' → Modify 不带 DEFAULT（部署时移除该默认值）
+        let items2 = diff(&tgt, &src);
+        assert_eq!(items2.len(), 1, "{items2:?}");
+        let sql2 = items2[0].sql.as_deref().unwrap();
+        assert!(sql2.contains("MODIFY COLUMN `name` varchar(64) NOT NULL"), "{sql2}");
+        assert!(!sql2.contains("DEFAULT"), "移除默认值时不应再带 DEFAULT: {sql2}");
+    }
+
+    #[test]
+    fn type_and_position_change_emits_single_modify_with_after() {        // 列既改类型又错位：一条 MODIFY 同时带新定义与 AFTER
+        let src = snap(
+            "src",
+            vec![table(
+                "t",
+                vec![
+                    col("a", "int", false),
+                    col("b", "varchar(255)", false),
+                    col("c", "int", true),
+                ],
+                vec![],
+            )],
+        );
+        let tgt = snap(
+            "tgt",
+            vec![table(
+                "t",
+                vec![
+                    col("a", "int", false),
+                    col("c", "int", true),
+                    col("b", "varchar(64)", false),
+                ],
+                vec![],
+            )],
+        );
+        let items = diff(&src, &tgt);
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].id, "col:t:b");
+        let sql = items[0].sql.as_deref().unwrap();
+        assert!(sql.contains("MODIFY COLUMN `b` varchar(255) NOT NULL AFTER `a`"), "{sql}");
     }
 
     #[test]
@@ -820,17 +880,16 @@ mod tests {
 
     #[test]
     fn first_added_column_uses_first_clause() {
-        // 源里 a 是第一列 → 新增到目标时用 FIRST，同时 id 需要后移到 a 之后
+        // 源里 a 是第一列 → 新增到目标时用 FIRST；
+        // ADD a FIRST 之后 id 天然落到 a 之后，不需要冗余的 MODIFY id AFTER a
         let src = snap("src", vec![table("t", vec![col("a", "int", true), col("id", "int", false)], vec![])]);
         let tgt = snap("tgt", vec![table("t", vec![col("id", "int", false)], vec![])]);
         let items = diff(&src, &tgt);
-        let combined = items.iter().find(|i| i.id == "col:t:__combined__").unwrap();
-        let sql = combined.sql.as_deref().unwrap();
-        assert!(sql.contains("ADD COLUMN `a` int NULL FIRST"), "{sql}");
-        assert!(sql.contains("MODIFY COLUMN `id` int NOT NULL AFTER `a`"), "{sql}");
-        // id 已存在不应有单独差异项
-        let add_id = items.iter().find(|i| i.id == "col:t:id");
-        assert!(add_id.is_none(), "id 已存在不应有差异项");
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].id, "col:t:a");
+        assert!(items[0].sql.as_deref().unwrap().contains("ADD COLUMN `a` int NULL FIRST"), "{}", items[0].sql.as_deref().unwrap());
+        // id 已在正确相对位置，不应产生差异项
+        assert!(!items.iter().any(|i| i.id == "col:t:id"), "id 不应有差异项: {items:?}");
     }
 
     #[test]
@@ -1099,8 +1158,8 @@ mod tests {
     }
 
     #[test]
-    fn column_order_change_detected() {
-        // 源：a, b, c；目标：a, c, b → b 需要移到 c 后面
+    fn column_order_change_moves_only_misplaced_column() {
+        // 源：a, b, c；目标：a, c, b → 只移动 b 到 a 后面；c 天然在位不动
         let src = snap(
             "src",
             vec![table(
@@ -1119,12 +1178,43 @@ mod tests {
         );
         let items = diff(&src, &tgt);
         assert_eq!(items.len(), 1, "{items:?}");
-        let m = &items[0];
-        assert_eq!(m.id, "col:t:__combined__");
-        let sql = m.sql.as_deref().unwrap();
-        // b 和 c 都被标记为位置变更，按源顺序执行 MODIFY b AFTER a, MODIFY c AFTER b
-        assert!(sql.contains("MODIFY COLUMN `b` int NULL AFTER `a`"), "{sql}");
-        assert!(sql.contains("MODIFY COLUMN `c` int NULL AFTER `b`"), "{sql}");
+        assert_eq!(items[0].id, "col:t:b");
+        let sql = items[0].sql.as_deref().unwrap();
+        assert_eq!(sql, "ALTER TABLE `tgt`.`t` MODIFY COLUMN `b` int NULL AFTER `a`");
+    }
+
+    #[test]
+    fn column_swap_moves_only_misplaced_column() {
+        // 纯换位：源 a,b,c,d；目标 a,c,b,d → 只动 b 一条
+        let src = snap(
+            "src",
+            vec![table(
+                "t",
+                vec![
+                    col("a", "int", false),
+                    col("b", "int", true),
+                    col("c", "int", true),
+                    col("d", "int", true),
+                ],
+                vec![],
+            )],
+        );
+        let tgt = snap(
+            "tgt",
+            vec![table(
+                "t",
+                vec![
+                    col("a", "int", false),
+                    col("c", "int", true),
+                    col("b", "int", true),
+                    col("d", "int", true),
+                ],
+                vec![],
+            )],
+        );
+        let items = diff(&src, &tgt);
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].id, "col:t:b");
     }
 
     #[test]
@@ -1325,13 +1415,14 @@ mod tests {
             assert_eq!(
                 ids,
                 vec![
-                    "col:customer:__combined__", // level 缺列 + phone varchar 不同 → 合并为一条 ALTER
-                    "tblopt:orders",              // 表注释不同
-                    "col:orders:status",          // 缺列 → 新增
-                    "col:orders:remark",          // 目标多余列 → 删除
-                    "idx:orders:idx_customer",    // 缺索引 → 新增
-                    "idx:orders:idx_amount",      // 目标多余索引 → 删除
-                    "tbl:promo",                  // 目标多余表 → 删除
+                    "col:customer:phone",        // phone 类型不同 → 单独一条 MODIFY
+                    "col:customer:level",        // 缺列 → 单独一条 ADD（AFTER phone）
+                    "tblopt:orders",             // 表注释不同
+                    "col:orders:status",         // 缺列 → 新增
+                    "col:orders:remark",         // 目标多余列 → 删除
+                    "idx:orders:idx_customer",   // 缺索引 → 新增
+                    "idx:orders:idx_amount",     // 目标多余索引 → 删除
+                    "tbl:promo",                 // 目标多余表 → 删除
                 ],
                 "差异清单不符: {ids:?}"
             );
@@ -1341,7 +1432,7 @@ mod tests {
             let promo = items.iter().find(|i| i.id == "tbl:promo").unwrap();
             assert!(promo.source_ddl.is_none(), "目标独有表不应有源 DDL");
             assert!(promo.target_ddl.as_deref().unwrap().contains("CREATE TABLE `db_shop_old`.`promo`"));
-            let phone = items.iter().find(|i| i.id == "col:customer:__combined__").unwrap();
+            let phone = items.iter().find(|i| i.id == "col:customer:phone").unwrap();
             assert!(
                 phone.source_ddl.as_deref().unwrap().contains("CREATE TABLE `db_shop`.`customer`")
                     && phone.source_ddl.as_deref().unwrap().contains("varchar(20)"),
