@@ -771,9 +771,10 @@ export const useCompareStore = create<CompareState>((set, get) => ({
         tables,
         compareOptions,
       )
-      const visible = items.filter((i) => !i.id.startsWith('tblopt:'))
-      // 不再前端重排：后端已按表连续产出、表内按"新增/修改(源列序)→删除→索引"产出，
-      // 该顺序就是逐条部署的安全执行顺序（AFTER 依赖的前驱先就位）；表间排序交给 buildDiffTree
+      // 表选项（ENGINE/默认 collation/COMMENT）差异同样展示，不再过滤。
+      // 保持后端顺序：表内即部署执行顺序（tblopt 也由后端排在最前，AFTER 前驱先就位），
+      // 表间排序交给 buildDiffTree
+      const visible = items
       if (get().runSeq !== seq) return
       set((s) => ({
         report: visible,
@@ -834,8 +835,8 @@ export const useCompareStore = create<CompareState>((set, get) => ({
       for (const r of reports) {
         const t = readyTargets.find((x) => x.key === r.key)
         if (!t) continue
-        const visible = r.items.filter((i) => !i.id.startsWith('tblopt:'))
-        // 保持后端顺序（表内即部署执行顺序），表间排序交给 buildDiffTree
+        // 表选项差异同样展示；保持后端顺序（表内即部署执行顺序），表间排序交给 buildDiffTree
+        const visible = r.items
         nextStates[t.key] = {
           report: visible,
           reportId: nextReportId,

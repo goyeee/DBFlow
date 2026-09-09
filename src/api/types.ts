@@ -191,3 +191,116 @@ export interface TargetReport {
   items: DiffItem[]
   error: AppErrorInfo | null
 }
+
+// ───────────────── 数据对比与同步 ─────────────────
+
+export type RowAction = 'insert' | 'update' | 'delete' | 'equal'
+export type TableDataStatus =
+  | 'equal'
+  | 'different'
+  | 'skipped'
+  | 'missingOnTarget'
+  | 'missingOnSource'
+
+export interface DataCompareOptions {
+  chunkSize: number
+  maxDetailRows: number
+}
+
+export interface RowCounts {
+  insert: number
+  update: number
+  delete: number
+  /** 两端一致的行数 */
+  equal: number
+}
+
+export interface CellDiff {
+  column: string
+  source: string
+  target: string
+  changed: boolean
+}
+
+export interface RowDiff {
+  key: string[]
+  action: RowAction
+  /** update：逐列前后值；insert/delete 为空（看 sourceRow/targetRow） */
+  cells: CellDiff[]
+  sourceRow: string[] | null
+  targetRow: string[] | null
+}
+
+/** 行级对照筛选：所有行 / 不同 / 单一动作 */
+export type RowPreviewFilter = 'all' | 'different' | RowAction
+
+/** 行级预览的一行（格式化展示值） */
+export interface RowPreview {
+  action: RowAction
+  key: string[]
+  source: string[] | null
+  target: string[] | null
+  /** 与 source 等长的逐列变更标记 */
+  changed: boolean[]
+}
+
+/** 行级预览：按键归并的两端全行（含一致行） */
+export interface TableRowsPreview {
+  table: string
+  columns: string[]
+  keyColumns: string[]
+  truncated: boolean
+  rows: RowPreview[]
+}
+
+export interface TableDataDiff {
+  table: string
+  status: TableDataStatus
+  skipReason?: string
+  keyColumns: string[]
+  /** 参与对比的列名（与明细行值一一对应） */
+  columns: string[]
+  counts: RowCounts
+  /** 明细因上限被截断（counts 仍是精确值） */
+  truncated: boolean
+  /** compare 响应中为 []；明细经 getTableDiffDetail 按需拉取 */
+  rows: RowDiff[]
+}
+
+/** 数据对比：单个目标结果 */
+export interface DataTargetReport {
+  reportId: string
+  key: string
+  connectionId: string
+  database: string
+  tables: TableDataDiff[]
+  error: AppErrorInfo | null
+}
+
+/** 表的可对比性（选择表步骤置灰无主键表用） */
+export interface TableKeyInfo {
+  name: string
+  keyColumns: string[] | null
+  skipReason?: string
+}
+
+/** 同步勾选粒度：表 × 类别 */
+export interface SyncSelection {
+  table: string
+  action: RowAction
+  /** 行级取消勾选的主键（格式化串），空/缺省 = 全部参与 */
+  excludeKeys?: string[][]
+}
+
+export interface DataSyncStatement {
+  table: string
+  action: RowAction
+  sql: string
+}
+
+export interface TableApplyResult {
+  table: string
+  ok: boolean
+  appliedCount: number
+  error: string | null
+}

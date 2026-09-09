@@ -1,6 +1,7 @@
 mod commands;
 mod compare;
 mod config;
+mod datacmp;
 mod datasource;
 mod error;
 mod navicat;
@@ -28,6 +29,7 @@ pub fn run() {
             app.manage(config::store::ConnectionStore::new(config_dir));
             app.manage(datasource::Registry::default());
             app.manage(tunnel::TunnelManager::default());
+            app.manage(commands::datacmp::DataCompareCache::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -44,6 +46,12 @@ pub fn run() {
             commands::compare::compare_schema,
             commands::compare::compare_schema_multi,
             commands::compare::apply_sync,
+            commands::datacmp::list_table_keys,
+            commands::datacmp::compare_data_multi,
+            commands::datacmp::get_table_diff_detail,
+            commands::datacmp::get_table_rows_preview,
+            commands::datacmp::preview_data_sync,
+            commands::datacmp::apply_data_sync,
             commands::explore::list_databases,
             commands::explore::list_tables,
             commands::explore::describe_table,

@@ -13,6 +13,7 @@ import { ConnectionTree } from '../connection/ConnectionTree'
 import { COLOR_PRESETS } from '../connection/colors'
 import { TableColumnsView } from '../table/TableColumnsView'
 import { SyncSchemaModal } from '../compare/SyncSchemaModal'
+import { DataSyncModal } from '../datacmp/DataSyncModal'
 import { TitleBar } from './TitleBar'
 import { errText } from '../connection/ConnectionTree'
 
@@ -261,6 +262,7 @@ export function AppShell() {
       </Layout>
 
       <SyncSchemaModal />
+      <DataSyncModal />
 
       {tabTip && (
         <div className="tab-tip" style={{ left: tabTip.x, top: tabTip.y }}>

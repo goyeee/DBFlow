@@ -8,10 +8,12 @@ import {
   PlusOutlined,
   ReloadOutlined,
   SettingOutlined,
+  SwapOutlined,
 } from '@ant-design/icons'
 import { api } from '../../api/commands'
 import { useConnectionsStore } from '../../stores/connections'
 import { useCompareStore } from '../../stores/compare'
+import { useDataCompareStore } from '../../stores/dataCompare'
 import { useSessionStore } from '../../stores/session'
 import { useUiStore } from '../../stores/ui'
 import { errText } from '../connection/ConnectionTree'
@@ -21,6 +23,7 @@ export function TitleBar() {
   const openGroupModal = useUiStore((s) => s.openGroupModal)
   const setNavicatOpen = useUiStore((s) => s.setNavicatOpen)
   const openSyncSchema = useCompareStore((s) => s.openModal)
+  const openDataSync = useDataCompareStore((s) => s.openModal)
   const load = useConnectionsStore((s) => s.load)
   const refreshConnected = useSessionStore((s) => s.refreshConnected)
 
@@ -86,6 +89,18 @@ export function TitleBar() {
             onClick={openSyncSchema}
           >
             结构同步
+          </Button>
+        </Tooltip>
+        <Tooltip title="数据同步" placement="bottom">
+          <Button
+            type="text"
+            size="small"
+            className="titlebar-btn"
+            data-tauri-drag-region="no-drag"
+            icon={<SwapOutlined />}
+            onClick={openDataSync}
+          >
+            数据同步
           </Button>
         </Tooltip>
         <Dropdown menu={{ items: moreItems }} placement="bottomLeft">

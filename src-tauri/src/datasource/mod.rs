@@ -30,6 +30,21 @@ pub trait LiveConnection: Send + Sync {
     ) -> AppResult<SchemaSnapshot>;
     /// 执行一条 DDL/SQL（同步部署用）
     async fn execute(&self, sql: &str) -> AppResult<()>;
+    /// 按对比键 keyset 分页拉取一块行数据（数据对比用）。
+    /// select_exprs 与返回行的每一列一一对应；after_key 为上一块最后一行的键值；
+    /// 返回行按键列升序。时间/小数类列已由调用方在 select_exprs 里包装成规范化文本。
+    async fn fetch_rows_chunk(
+        &self,
+        database: &str,
+        table: &str,
+        select_exprs: &[String],
+        key_columns: &[String],
+        after_key: Option<&[Value]>,
+        limit: u32,
+    ) -> AppResult<Vec<Vec<Value>>>;
+    /// 单连接顺序执行多条 DML：先 SET FOREIGN_KEY_CHECKS=0，全部包在一个事务里，
+    /// 任一失败回滚（数据同步用；与 execute 的逐条自治语义不同）
+    async fn execute_batch_tx(&self, sqls: &[String]) -> AppResult<()>;
     /// 返回服务器版本号（MySQL 为 SELECT VERSION()）
     async fn ping(&self) -> AppResult<String>;
     /// 关闭连接池并释放关联的 SSH 隧道
@@ -64,6 +79,69 @@ pub struct ColumnBrief {
     pub comment: Option<String>,
 }
 
+// ───────────────────────── 行数据（数据对比用） ─────────────────────────
+
+/// 归一化后的行值：两端各自拉取后可直接比较/哈希，不受版本与会话设置影响。
+/// 时间与小数类列在 SELECT 里已被包装成规范化文本（见 datacmp 引擎）。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
+    Null,
+    Int(i64),
+    UInt(u64),
+    Float(f64),
+    /// 归一化十进制文本（去尾零、去前导零）
+    Decimal(String),
+    Text(String),
+    Bytes(Vec<u8>),
+    /// YYYY-MM-DD
+    Date(String),
+    /// YYYY-MM-DD HH:MM:SS[.ffffff]（会话时区已固定为 +00:00）
+    DateTime(String),
+    /// [H]HH:MM:SS[.ffffff]（可为负/超 24h）
+    Time(String),
+}
+
+impl Value {
+    /// 展示用格式化（明细界面）；Bytes 用占位符避免把大二进制塞进前端
+    pub fn display(&self) -> String {
+        match self {
+            Value::Null => "NULL".into(),
+            Value::Int(v) => v.to_string(),
+            Value::UInt(v) => v.to_string(),
+            Value::Float(v) => v.to_string(),
+            Value::Decimal(s) | Value::Text(s) | Value::Date(s) | Value::DateTime(s) | Value::Time(s) => s.clone(),
+            Value::Bytes(b) => format!("[BLOB {}]", format_size(b.len())),
+        }
+    }
+
+    /// 哈希用规范化字节序列：带类型标签，避免 1(int) 与 "1"(text) 撞哈希
+    pub fn hash_bytes(&self, out: &mut Vec<u8>) {
+        match self {
+            Value::Null => out.push(0),
+            Value::Int(v) => { out.push(1); out.extend_from_slice(&v.to_le_bytes()) }
+            Value::UInt(v) => { out.push(2); out.extend_from_slice(&v.to_le_bytes()) }
+            Value::Float(v) => { out.push(3); out.extend_from_slice(&v.to_bits().to_le_bytes()) }
+            Value::Decimal(s) => { out.push(4); out.extend_from_slice(s.as_bytes()) }
+            Value::Text(s) => { out.push(5); out.extend_from_slice(s.as_bytes()) }
+            Value::Bytes(b) => { out.push(6); out.extend_from_slice(&(b.len() as u64).to_le_bytes()); out.extend_from_slice(b) }
+            Value::Date(s) => { out.push(7); out.extend_from_slice(s.as_bytes()) }
+            Value::DateTime(s) => { out.push(8); out.extend_from_slice(s.as_bytes()) }
+            Value::Time(s) => { out.push(9); out.extend_from_slice(s.as_bytes()) }
+        }
+        out.push(0xff); // 值间分隔，防拼接歧义
+    }
+}
+
+fn format_size(n: usize) -> String {
+    if n >= 1024 * 1024 {
+        format!("{:.1}MB", n as f64 / 1024.0 / 1024.0)
+    } else if n >= 1024 {
+        format!("{:.1}KB", n as f64 / 1024.0)
+    } else {
+        format!("{}B", n)
+    }
+}
+
 // ───────────────────────── 结构快照（对比/同步用） ─────────────────────────
 
 /// 一个库的结构快照：表（含列与索引）与视图定义
@@ -72,6 +150,8 @@ pub struct SchemaSnapshot {
     pub database: String,
     pub tables: Vec<TableDef>,
     pub views: Vec<ViewDef>,
+    /// 目标服务器版本（如 "8.4.11" / "5.6.40"），用于跨版本 collation 归一化
+    pub server_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
