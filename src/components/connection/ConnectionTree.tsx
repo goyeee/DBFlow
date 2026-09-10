@@ -34,12 +34,18 @@ export function errText(e: unknown): string {
   return err?.message || String(e)
 }
 
+// 树加载失败提示：固定 key 去重——反复失败时只更新同一个弹层，绝不堆叠
+const showLoadError = (e: unknown) =>
+  message.error({ content: errText(e), key: 'tree-load-error', duration: 3 })
+
 export function ConnectionTree() {
   const { groups, connections } = useConnectionsStore()
   const session = useSessionStore()
   const ui = useUiStore()
   const [expandedKeys, setExpandedKeys] = useState<string[]>([])
   const [selectedKeys, setSelectedKeys] = useState<string[]>([])
+  // 加载失败的节点：计入受控 loadedKeys，阻断 rc-tree 的重试循环
+  const [loadFailedKeys, setLoadFailedKeys] = useState<string[]>([])
   // 手动控制 loadedKeys：让 rc-tree 的 loadData 只在"缓存未加载"时触发，
   // 刷新/断开导致缓存清空后能自动重新加载，避免空缓存节点被反复请求
   const loadedKeys = useMemo(() => {
@@ -54,8 +60,8 @@ export function ConnectionTree() {
         }
       }
     }
-    return keys
-  }, [connections, session.dbsCache, session.tablesCache])
+    return [...keys, ...loadFailedKeys]
+  }, [connections, session.dbsCache, session.tablesCache, loadFailedKeys])
 
   // 双击防抖：双击的第二次点击不再切换展开状态
   const lastClick = useRef<{ key: string; time: number }>({ key: '', time: 0 })
@@ -162,12 +168,16 @@ export function ConnectionTree() {
 
   const loadData = useCallback(
     async (key: string): Promise<void> => {
+      // 重试前先摘掉失败标记（若 rc-tree 已视为"已加载"，由 onExpand 手动触发重试）
+      setLoadFailedKeys((prev) => prev.filter((k) => k !== key))
       try {
         await ensureNodeLoaded(key)
       } catch (e) {
-        // 加载失败必须可见（之前静默吞掉会让节点"再也打不开"）
-        message.error(errText(e))
-        throw e
+        // 加载失败必须可见（之前静默吞掉会让节点"再也打不开"）。
+        // 同时标记失败：rc-tree 对"展开但未加载"的节点每次渲染都会重新触发 loadData，
+        // 不标记的话连接失败会陷入 无限重连 + 弹层风暴。
+        setLoadFailedKeys((prev) => (prev.includes(key) ? prev : [...prev, key]))
+        showLoadError(e)
       }
     },
     [ensureNodeLoaded],
@@ -188,7 +198,7 @@ export function ConnectionTree() {
         await ensureNodeLoaded(connKey)
         await ensureNodeLoaded(dbKey)
       } catch (e) {
-        message.error(errText(e))
+        showLoadError(e)
         return
       }
       if (cancelled) return
@@ -320,8 +330,13 @@ export function ConnectionTree() {
       selectedKeys={selectedKeys}
       loadedKeys={loadedKeys}
       onExpand={(keys) => {
+        const next = keys as string[]
         // 展开状态由 rc-tree 的 loadData 自动加载子节点；这里只同步受控 keys
-        setExpandedKeys(keys as string[])
+        setExpandedKeys(next)
+        // 失败节点已被标记为"已加载"，rc-tree 不会再自动加载：用户再次展开时手动重试一次
+        for (const k of next) {
+          if (loadFailedKeys.includes(k)) loadData(k)
+        }
       }}
       loadData={(node) => loadData(String(node.key))}
       onSelect={(keys, info) => {
