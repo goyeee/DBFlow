@@ -407,13 +407,13 @@ export function DataSyncModal() {
         return {
           key: t.key,
           label: (
-            <span
-              className="cmp-target-tab-label"
-              style={{
-                borderBottom: color ? `3px solid ${color}` : undefined,
-                padding: color ? '0 2px' : undefined,
-              }}
-            >
+            <span className="cmp-target-tab-label">
+              {color && (
+                <span
+                  className="color-dot"
+                  style={{ background: color, marginRight: 6, verticalAlign: 'middle' }}
+                />
+              )}
               {conn ? `${conn.name} / ${t.database}` : t.database}
               {st?.error ? (
                 <CloseCircleOutlined style={{ color: '#ff4d4f', marginLeft: 4 }} />
