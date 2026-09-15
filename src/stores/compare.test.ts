@@ -156,18 +156,18 @@ describe('结构同步弹窗状态机', () => {
     expect(useCompareStore.getState().target.connectionId).toBe('c2')
   })
 
-  it('对比结果默认勾选非危险项，DROP 类不勾', async () => {
+  it('对比结果默认全不选，由用户自行勾选', async () => {
     openWithEndpoints()
     mockCompare.mockResolvedValue([item('a', 'create'), item('b', 'drop', true)])
     await useCompareStore.getState().runCompare()
-    expect(useCompareStore.getState().selectedIds).toEqual(['a'])
+    expect(useCompareStore.getState().selectedIds).toEqual([])
   })
 
   it('空选择不能进入部署页', async () => {
     openWithEndpoints()
     mockCompare.mockResolvedValue([item('b', 'drop', true)])
     await useCompareStore.getState().runCompare()
-    // 唯一的项是危险项，默认不勾 → 空选择
+    // 默认全不选 → 空选择
     useCompareStore.getState().gotoDeploy()
     expect(useCompareStore.getState().step).toBe('diff')
 
@@ -207,6 +207,7 @@ describe('结构同步弹窗状态机', () => {
   it('runCompare 把对比选项传给后端', async () => {
     openWithEndpoints()
     useCompareStore.setState({
+      scopeAll: true,
       compareOptions: { compareIndexes: false, compareViews: true },
     })
     mockCompare.mockResolvedValue([])
@@ -218,6 +219,36 @@ describe('结构同步弹窗状态机', () => {
       'db2',
       undefined,
       { compareIndexes: false, compareViews: true },
+    )
+  })
+
+  it('对比范围默认"全部表"（tables 参数为 undefined）', async () => {
+    openWithEndpoints()
+    expect(useCompareStore.getState().scopeAll).toBe(true)
+    mockCompare.mockResolvedValue([])
+    await useCompareStore.getState().runCompare()
+    expect(mockCompare).toHaveBeenCalledWith(
+      'c1',
+      'db1',
+      'c2',
+      'db2',
+      undefined,
+      { compareIndexes: true, compareViews: false },
+    )
+  })
+
+  it('指定表模式把选中的表清单传给后端', async () => {
+    openWithEndpoints()
+    useCompareStore.setState({ scopeAll: false, sourceTables: ['t1', 't2'] })
+    mockCompare.mockResolvedValue([])
+    await useCompareStore.getState().runCompare()
+    expect(mockCompare).toHaveBeenCalledWith(
+      'c1',
+      'db1',
+      'c2',
+      'db2',
+      ['t1', 't2'],
+      { compareIndexes: true, compareViews: false },
     )
   })
 
@@ -341,6 +372,7 @@ describe('多目标结构同步', () => {
     useCompareStore.setState({
       modalOpen: true,
       mode: 'multi',
+      scopeAll: true,
       source: { connectionId: 'c1', database: 'db1' },
       targets: [
         { key: 'k1', connectionId: 'c2', database: 'db2', dbs: [], loadingDbs: false },

@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { api } from '../api/commands'
+import { withSessionReconnect } from './session'
 import type {
   AppErrorInfo,
   ApplyResultItem,
@@ -264,11 +265,6 @@ export function buildDeployStatements(items: DiffItem[]): string[] {
   return out
 }
 
-/** 默认勾选：非破坏性项；DROP 类留给用户手动勾 */
-function defaultSelected(items: DiffItem[]): string[] {
-  return items.filter((i) => !i.dangerous).map((i) => i.id)
-}
-
 /** 结果树默认展开的行 key：分组行默认展开，表行默认收起 */
 function defaultExpandedKeys(items: DiffItem[] | null, mode: GroupMode): string[] {
   return buildDiffTree(items ?? [], mode)
@@ -427,6 +423,7 @@ export const useCompareStore = create<CompareState>((set, get) => ({
   targetDbs: [],
   loadingSourceDbs: false,
   loadingTargetDbs: false,
+  // 结构对比默认全部表
   scopeAll: true,
   sourceTables: [],
   sourceTableList: [],
@@ -461,7 +458,9 @@ export const useCompareStore = create<CompareState>((set, get) => ({
       if (!source.connectionId) return
       set({ loadingSourceDbs: true })
       try {
-        const dbs = await api.listDatabases(source.connectionId)
+        const dbs = await withSessionReconnect(source.connectionId, () =>
+          api.listDatabases(source.connectionId!),
+        )
         set({ sourceDbs: dbs, loadingSourceDbs: false })
       } catch {
         set({ loadingSourceDbs: false })
@@ -473,7 +472,9 @@ export const useCompareStore = create<CompareState>((set, get) => ({
         if (!target.connectionId) return
         set({ loadingTargetDbs: true })
         try {
-          const dbs = await api.listDatabases(target.connectionId)
+          const dbs = await withSessionReconnect(target.connectionId, () =>
+            api.listDatabases(target.connectionId!),
+          )
           set({ targetDbs: dbs, loadingTargetDbs: false })
         } catch {
           set({ loadingTargetDbs: false })
@@ -494,7 +495,9 @@ export const useCompareStore = create<CompareState>((set, get) => ({
           ),
         }))
         try {
-          const dbs = await api.listDatabases(t.connectionId)
+          const dbs = await withSessionReconnect(t.connectionId, () =>
+            api.listDatabases(t.connectionId!),
+          )
           set((s) => ({
             targets: s.targets.map((x) =>
               x.key === t.key ? { ...x, dbs, loadingDbs: false } : x,
@@ -543,7 +546,7 @@ export const useCompareStore = create<CompareState>((set, get) => ({
       runSeq: s.runSeq + 1,
     }))
     try {
-      const dbs = await api.listDatabases(connectionId)
+      const dbs = await withSessionReconnect(connectionId, () => api.listDatabases(connectionId))
       set({ sourceDbs: dbs, loadingSourceDbs: false })
     } catch (e) {
       set({ loadingSourceDbs: false })
@@ -568,7 +571,7 @@ export const useCompareStore = create<CompareState>((set, get) => ({
       runSeq: s.runSeq + 1,
     }))
     try {
-      const dbs = await api.listDatabases(connectionId)
+      const dbs = await withSessionReconnect(connectionId, () => api.listDatabases(connectionId))
       set({ targetDbs: dbs, loadingTargetDbs: false })
     } catch (e) {
       set({ loadingTargetDbs: false })
@@ -700,7 +703,7 @@ export const useCompareStore = create<CompareState>((set, get) => ({
       runSeq: s.runSeq + 1,
     }))
     try {
-      const dbs = await api.listDatabases(connectionId)
+      const dbs = await withSessionReconnect(connectionId, () => api.listDatabases(connectionId))
       set((s) => ({
         targets: s.targets.map((t) =>
           t.key === key ? { ...t, dbs, loadingDbs: false } : t,
@@ -737,7 +740,9 @@ export const useCompareStore = create<CompareState>((set, get) => ({
     if (!source.connectionId || !source.database) return
     set({ loadingSourceTables: true })
     try {
-      const tables = await api.listTables(source.connectionId, source.database)
+      const tables = await withSessionReconnect(source.connectionId, () =>
+        api.listTables(source.connectionId!, source.database!),
+      )
       set({ sourceTableList: tables, loadingSourceTables: false })
     } catch {
       set({ sourceTableList: [], loadingSourceTables: false })
@@ -763,13 +768,20 @@ export const useCompareStore = create<CompareState>((set, get) => ({
         })
         .catch(() => undefined)
       const tables = scopeAll ? undefined : sourceTables
-      const items = await api.compareSchema(
-        source.connectionId,
-        source.database,
-        target.connectionId,
-        target.database,
-        tables,
-        compareOptions,
+      const srcId = source.connectionId!
+      const tgtId = target.connectionId!
+      // 任一端会话失效（长时间未用/隧道被掐）时先自动重连该端再重试一次对比
+      const items = await withSessionReconnect(srcId, () =>
+        withSessionReconnect(tgtId, () =>
+          api.compareSchema(
+            srcId,
+            source.database!,
+            tgtId,
+            target.database!,
+            tables,
+            compareOptions,
+          ),
+        ),
       )
       // 表选项（ENGINE/默认 collation/COMMENT）差异同样展示，不再过滤。
       // 保持后端顺序：表内即部署执行顺序（tblopt 也由后端排在最前，AFTER 前驱先就位），
@@ -779,7 +791,8 @@ export const useCompareStore = create<CompareState>((set, get) => ({
       set((s) => ({
         report: visible,
         reportId: s.reportId + 1,
-        selectedIds: defaultSelected(visible),
+        // 默认全不选，由用户自行勾选要同步的对象
+        selectedIds: [],
         expandedKeys: defaultExpandedKeys(visible, s.groupMode),
         activeTable: null,
         activeItemId: null,
@@ -819,12 +832,16 @@ export const useCompareStore = create<CompareState>((set, get) => ({
         connectionId: t.connectionId!,
         database: t.database!,
       }))
-      const reports = await api.compareSchemaMulti(
-        source.connectionId,
-        source.database,
-        scopeAll ? null : sourceTables,
-        specs,
-        compareOptions,
+      // 源端会话失效时先自动重连再重试一次；目标端失效体现在各自结果的 error 里
+      const srcId = source.connectionId!
+      const reports = await withSessionReconnect(srcId, () =>
+        api.compareSchemaMulti(
+          srcId,
+          source.database!,
+          scopeAll ? null : sourceTables,
+          specs,
+          compareOptions,
+        ),
       )
       if (get().runSeq !== seq) return
 
@@ -840,7 +857,8 @@ export const useCompareStore = create<CompareState>((set, get) => ({
         nextStates[t.key] = {
           report: visible,
           reportId: nextReportId,
-          selectedIds: defaultSelected(visible),
+          // 默认全不选，由用户自行勾选要同步的对象
+          selectedIds: [],
           expandedKeys: defaultExpandedKeys(visible, get().groupMode),
           activeTable: null,
           activeItemId: null,

@@ -712,7 +712,7 @@ mod e2e_tests {
             color: None,
             db: DatabaseKind::MySql,
             host: "127.0.0.1".into(),
-            port: 3306,
+            port: 3308,
             user: "root".into(),
             default_database: None,
             has_password: true,
@@ -732,7 +732,7 @@ mod e2e_tests {
             return;
         }
         let profile = test_profile();
-        let endpoint = ConnectEndpoint { host: "127.0.0.1".into(), port: 3306 };
+        let endpoint = ConnectEndpoint { host: "127.0.0.1".into(), port: 3308 };
         let pool = open_pool(&profile, &endpoint, Some("dbflow-a-2026"))
             .await
             .expect("连接 mysql-a 失败");
@@ -786,7 +786,7 @@ mod e2e_tests {
             return;
         }
         let profile = test_profile();
-        let endpoint = ConnectEndpoint { host: "127.0.0.1".into(), port: 3306 };
+        let endpoint = ConnectEndpoint { host: "127.0.0.1".into(), port: 3308 };
         let err = open_pool(&profile, &endpoint, Some("wrong-password"))
             .await
             .expect_err("错误密码不应连接成功");
@@ -802,7 +802,7 @@ mod e2e_tests {
             eprintln!("跳过（未设置 DBFLOW_E2E）");
             return;
         }
-        for (port, password) in [(3306u16, "dbflow-a-2026"), (3307u16, "123123")] {
+        for (port, password) in [(3308u16, "dbflow-a-2026"), (3307u16, "123123")] {
             let profile = test_profile();
             let endpoint = ConnectEndpoint { host: "127.0.0.1".into(), port };
             let pool = open_pool(&profile, &endpoint, Some(password))
@@ -841,7 +841,7 @@ mod e2e_tests {
             return;
         }
         let mut lives = Vec::new();
-        for (port, password) in [(3306u16, "dbflow-a-2026"), (3307u16, "123123")] {
+        for (port, password) in [(3308u16, "dbflow-a-2026"), (3307u16, "123123")] {
             let profile = test_profile();
             let endpoint = ConnectEndpoint { host: "127.0.0.1".into(), port };
             let pool = open_pool(&profile, &endpoint, Some(password)).await.expect("连接失败");
@@ -873,7 +873,7 @@ mod e2e_tests {
             return;
         }
         let mut lives: Vec<std::sync::Arc<dyn LiveConnection>> = Vec::new();
-        for (port, password) in [(3306u16, "dbflow-a-2026"), (3307u16, "123123")] {
+        for (port, password) in [(3308u16, "dbflow-a-2026"), (3307u16, "123123")] {
             let profile = test_profile();
             let endpoint = ConnectEndpoint { host: "127.0.0.1".into(), port };
             let pool = open_pool(&profile, &endpoint, Some(password)).await.expect("连接失败");

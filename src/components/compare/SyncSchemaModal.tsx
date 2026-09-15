@@ -280,9 +280,7 @@ export function SyncSchemaModal() {
       </div>
     )
 
-  const stepTitle = cmp.step === 'select' && (
-    <div className="cmp-step-title">{STEP_TITLES[cmp.step]}</div>
-  )
+  const stepTitle = <div className="cmp-step-title">{STEP_TITLES[cmp.step]}</div>
 
   /** 源端面板：连接 + 数据库 + 同步范围 */
   const sourcePanel = () => {
@@ -341,8 +339,8 @@ export function SyncSchemaModal() {
             block
             value={cmp.scopeAll ? 'all' : 'tables'}
             options={[
-              { value: 'all', label: '全部表' },
               { value: 'tables', label: '指定表' },
+              { value: 'all', label: '全部表' },
             ]}
             onChange={(v) => cmp.setScopeAll(v === 'all')}
           />
@@ -840,22 +838,21 @@ export function SyncSchemaModal() {
               message={`将执行 ${selectedSqls.length} 条语句${dangerousSelected > 0 ? `，其中 ${dangerousSelected} 条为删除类操作（不可恢复）` : ''}`}
             />
             <div className="cmp-deploy-list">
-              {selectedSqls.map((sql, i) => {
-                const r = cmp.applyResults?.[i]
-                return (
-                  <div key={i} className="cmp-deploy-item">
-                    {r &&
-                      (r.ok ? (
-                        <CheckCircleOutlined style={{ color: '#52c41a' }} />
-                      ) : (
-                        <CloseCircleOutlined style={{ color: '#ff4d4f' }} />
-                      ))}
-                    <div className="cmp-deploy-sql">
-                      <SqlView sql={sql} emptyText="" />
-                    </div>
-                  </div>
-                )
-              })}
+              {/* 整段脚本一个视图：所有语句合并展示，执行后以内联注释标注每条成败 */}
+              <SqlView
+                sql={
+                  selectedSqls.length > 0
+                    ? `${selectedSqls
+                        .map((sql, i) => {
+                          const r = cmp.applyResults?.[i]
+                          if (!r) return sql
+                          return `${r.ok ? '-- ✓ 执行成功' : '-- ✗ 执行失败'}\n${sql}`
+                        })
+                        .join(';\n\n')};`
+                    : null
+                }
+                emptyText="没有勾选任何语句（返回上一步勾选）"
+              />
             </div>
             {cmp.applying && (
               <div style={{ marginTop: 8 }}>

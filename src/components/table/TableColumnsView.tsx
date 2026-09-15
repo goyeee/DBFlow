@@ -36,7 +36,6 @@ export function TableColumnsView({ tab }: { tab: TableTab }) {
     <div className="table-cols-view" style={{ padding: 12 }}>
       <div style={{ marginBottom: 8, color: '#888' }}>
         {tab.database} <span style={{ margin: '0 4px' }}>/</span> {tab.table}
-        <span style={{ marginLeft: 12, fontSize: 12 }}>（结构对比与同步将在后续版本提供）</span>
       </div>
       {loading && <Spin />}
       {error && <Alert type="error" showIcon message={error} />}

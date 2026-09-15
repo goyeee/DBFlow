@@ -1483,8 +1483,8 @@ mod tests {
                 return;
             }
             // 源：mysql-a 直连
-            let endpoint_a = ConnectEndpoint { host: "127.0.0.1".into(), port: 3306 };
-            let pool_a = mysql::open_pool(&profile("127.0.0.1", 3306, ""), &endpoint_a, Some("dbflow-a-2026"))
+            let endpoint_a = ConnectEndpoint { host: "127.0.0.1".into(), port: 3308 };
+            let pool_a = mysql::open_pool(&profile("127.0.0.1", 3308, ""), &endpoint_a, Some("dbflow-a-2026"))
                 .await
                 .expect("连接 mysql-a 失败");
             let src = MySqlLive::new(pool_a, None);
@@ -1636,8 +1636,8 @@ mod tests {
                 eprintln!("跳过（未设置 DBFLOW_E2E）");
                 return;
             }
-            let endpoint_a = ConnectEndpoint { host: "127.0.0.1".into(), port: 3306 };
-            let pool_a = mysql::open_pool(&profile("127.0.0.1", 3306, ""), &endpoint_a, Some("dbflow-a-2026"))
+            let endpoint_a = ConnectEndpoint { host: "127.0.0.1".into(), port: 3308 };
+            let pool_a = mysql::open_pool(&profile("127.0.0.1", 3308, ""), &endpoint_a, Some("dbflow-a-2026"))
                 .await
                 .expect("连接 mysql-a 失败");
             let a = MySqlLive::new(pool_a, None);
@@ -1753,8 +1753,8 @@ mod tests {
             }
 
             // 源：8.4 的 db_shop_xv（init-a.sql 建的）
-            let endpoint_a = ConnectEndpoint { host: "127.0.0.1".into(), port: 3306 };
-            let pool_a = mysql::open_pool(&profile("127.0.0.1", 3306, ""), &endpoint_a, Some("dbflow-a-2026"))
+            let endpoint_a = ConnectEndpoint { host: "127.0.0.1".into(), port: 3308 };
+            let pool_a = mysql::open_pool(&profile("127.0.0.1", 3308, ""), &endpoint_a, Some("dbflow-a-2026"))
                 .await
                 .expect("连接 mysql-a 失败");
             let l8 = MySqlLive::new(pool_a, None);

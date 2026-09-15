@@ -366,15 +366,6 @@ textarea,
   -webkit-user-select: none;
 }
 
-/* DDL/部署脚本/部署页语句保持可文本选择 */
-.sql-view,
-.cmp-deploy-list .sql-view,
-.cmp-ddl-pane .sql-view,
-.cmp-deploy-sql {
-  user-select: text;
-  -webkit-user-select: text;
-}
-
 /* 弹窗内标题、静态区域禁止选中 */
 .sync-schema-modal .ant-modal-title,
 .cmp-step-title,
@@ -386,8 +377,7 @@ textarea,
 .cmp-footer,
 .cmp-resizer,
 .cmp-progress-mask,
-.cmp-progress-card,
-.cmp-deploy-item > .anticon {
+.cmp-progress-card {
   user-select: none;
   -webkit-user-select: none;
 }
@@ -898,11 +888,6 @@ textarea,
   padding-right: 12px;
 }
 
-/* 部署页每条 SQL 容器：避免跨行选中到间隙 */
-.cmp-deploy-sql .sql-view {
-  padding: 4px 8px;
-}
-
 .sql-kw {
   color: #0033b3;
   font-weight: 600;
@@ -937,26 +922,6 @@ textarea,
   flex: 1;
   min-height: 120px;
   overflow: auto;
-}
-
-.cmp-deploy-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  margin-bottom: 4px;
-}
-
-.cmp-deploy-no {
-  display: none;
-}
-
-.cmp-deploy-sql {
-  flex: 1;
-  min-width: 0;
-}
-
-.cmp-deploy-sql .sql-view {
-  max-height: 100px;
 }
 
 /* DDL 面板标题栏与下方 SQL 区连成一体 */
@@ -1078,59 +1043,33 @@ textarea,
   display: flex;
   gap: 0;
 }
-/* 行勾选窄条：贴弹窗左侧，与源数据区隔开（margin-right）；无横向内容，纵向跟随同步 */
-.dcmp-rowchecks {
-  flex: 0 0 36px;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  border: 1px solid #f0f0f0;
-  border-radius: 6px 0 0 6px;
-  border-right: none;
-  background: #fafafa;
-  overflow: hidden;
-  margin-right: 4px;
-}
-.dcmp-rowchecks-head {
-  flex: none;
-  height: 25px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-bottom: 1px solid #f0f0f0;
-}
-.dcmp-rowchecks-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-}
-.dcmp-check-table {
-  border-collapse: separate;
-  border-spacing: 0;
-  table-layout: fixed;
-  width: 100%;
-}
-/* 表头占位与数据面板列头严格等高；sticky 保证同步滚动时钉在顶部 */
-.dcmp-check-table .dcmp-check-head-cell,
-.dcmp-pane-table thead th {
-  box-sizing: border-box;
-  height: 26px;
-  padding: 0 8px;
-  border-bottom: 1px solid #e8e8e8;
-}
-.dcmp-check-table .dcmp-check-head-cell {
+/* 勾选列：源端面板首列 sticky，与数据行同表格原生滚动，永不错位 */
+.dcmp-pane-table .dcmp-check-col {
   position: sticky;
-  top: 0;
-  z-index: 2;
-  background: #fafafa;
-}
-.dcmp-check-table td {
-  box-sizing: border-box;
-  height: 24px;
+  left: 0;
+  z-index: 1;
+  width: 36px;
+  min-width: 36px;
+  max-width: 36px;
   padding: 0;
   text-align: center;
-  line-height: 22px;
-  border-bottom: 1px solid #f5f5f5;
+  background: #fff;
+  border-right: 1px solid #f0f0f0;
+}
+/* 表头勾选格：同时钉住列头行，层级高于行勾选列与普通列头 */
+.dcmp-pane-table thead .dcmp-check-col {
+  z-index: 3;
+  background: #fafafa;
+}
+/* 行操作底色覆盖勾选列默认白底 */
+.dcmp-row-insert > td.dcmp-check-col {
+  background: #f6ffed;
+}
+.dcmp-row-delete > td.dcmp-check-col {
+  background: #fff2f0;
+}
+.dcmp-row-update > td.dcmp-check-col {
+  background: #fffbe6;
 }
 .dcmp-pane {
   flex: 1 1 0;
@@ -1187,12 +1126,15 @@ textarea,
   position: sticky;
   top: 0;
   z-index: 2;
+  box-sizing: border-box;
+  height: 26px;
+  padding: 0 8px;
   background: #fafafa;
   font-weight: 600;
   line-height: 24px;
+  border-bottom: 1px solid #e8e8e8;
 }
-/* 数据行：border-box 定高，与勾选条行严格一致（不再用 content-visibility，
-   其占位高与实际高不等会导致三区逐行错位） */
+/* 数据行：border-box 定高 24px */
 .dcmp-pane-table tbody td {
   height: 24px;
   padding: 0 8px;

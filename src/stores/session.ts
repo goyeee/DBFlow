@@ -50,34 +50,8 @@ interface SessionState {
 }
 
 export const useSessionStore = create<SessionState>((set, get) => {
-  /** 判断错误是否属于"连接已失效/超时"，值得先 forceReconnect 再重试一次 */
-  const isConnectionLostError = (e: unknown): boolean => {
-    const err = e as AppErrorInfo
-    if (!err) return false
-    if (err.code === 'not_found') return true
-    const msg = err.message || ''
-    const retryable =
-      /EOF|broken pipe|Connection reset|expected to read|network|communicating|timed out|timeout|closed/i.test(
-        msg,
-      )
-    const denied =
-      /Access denied|用户名或密码错误|认证失败|authentication|password/i.test(msg)
-    return retryable && !denied
-  }
-
   /** 通用"断线重连一次"包装：操作失败且判断为连接丢失时，先 forceReconnect 再重试 */
-  const withReconnect = async <T>(
-    connectionId: string,
-    operation: () => Promise<T>,
-  ): Promise<T> => {
-    try {
-      return await operation()
-    } catch (e) {
-      if (!isConnectionLostError(e)) throw e
-      await get().forceReconnect(connectionId)
-      return await operation()
-    }
-  }
+  const withReconnect = withSessionReconnect
 
   return {
     connected: {},
@@ -265,3 +239,26 @@ export const useSessionStore = create<SessionState>((set, get) => {
     }),
   }
 })
+
+/** 断线自愈包装（供其他 store 复用）：连接失效类错误（EOF/not_found 等）时
+ *  先强制重连一次再重试操作；密码错误等认证类失败不在此列，原样抛出 */
+export async function withSessionReconnect<T>(
+  connectionId: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation()
+  } catch (e) {
+    const err = e as AppErrorInfo
+    const retryable =
+      err?.code === 'not_found' ||
+      /EOF|broken pipe|Connection reset|expected to read|network|communicating|timed out|timeout|closed/i.test(
+        err?.message || '',
+      )
+    const denied =
+      /Access denied|用户名或密码错误|认证失败|authentication|password/i.test(err?.message || '')
+    if (!retryable || denied) throw e
+    await useSessionStore.getState().forceReconnect(connectionId)
+    return await operation()
+  }
+}

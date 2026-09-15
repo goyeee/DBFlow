@@ -248,7 +248,10 @@ export function ConnectionTree() {
           const cacheKey = `${c.id}/${d.name}`
           const tables = session.tablesCache[cacheKey] ?? []
           const dbKey = `d:${c.id}:${encodeURIComponent(d.name)}`
-          const dbOpen = expandedKeys.includes(dbKey)
+          // 展开即视为打开；折叠时若标签栏仍有该库的表，也保持打开状态
+          const dbOpen =
+            expandedKeys.includes(dbKey) ||
+            session.tabs.some((tab) => tab.connectionId === c.id && tab.database === d.name)
           return {
             key: dbKey,
             icon: dbOpen ? (

@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { api } from '../api/commands'
+import { withSessionReconnect } from './session'
 import type {
   AppErrorInfo,
   CompareTargetSpec,
@@ -90,17 +91,6 @@ export const emptyDataTargetState = (): DataTargetState => ({
 
 const MAX_TARGETS = 8
 
-/** 默认勾选：insert/update 勾上，delete（破坏性）留给用户手动勾 */
-export function defaultSelected(tables: TableDataDiff[]): string[] {
-  const out: string[] = []
-  for (const t of tables) {
-    if (t.status !== 'different') continue
-    if (t.counts.insert > 0) out.push(selKey(t.table, 'insert'))
-    if (t.counts.update > 0) out.push(selKey(t.table, 'update'))
-  }
-  return out
-}
-
 /** 勾选列表 → 后端 SyncSelection */
 export function toSelections(selected: string[]): SyncSelection[] {
   return selected.map((s) => {
@@ -158,8 +148,16 @@ interface DataCompareState {
   setActiveTable: (table: string | null) => Promise<void>
   toggleSelection: (table: string, action: RowAction) => void
   setTableChecked: (table: string, actions: RowAction[], checked: boolean) => void
-  /** 行级勾选：checked=false 记入 uncheckedRows，true 则移除 */
-  setRowChecked: (table: string, action: RowAction, rowKey: string, checked: boolean) => void
+  /** 行级勾选：checked=false 记入 uncheckedRows，true 则移除；
+   *  勾选"整体未勾选"类别中的一行时，需传该类别全部行 key（siblingKeys），
+   *  其余行进入排除清单，保证只选中这一行 */
+  setRowChecked: (
+    table: string,
+    action: RowAction,
+    rowKey: string,
+    checked: boolean,
+    siblingKeys?: string[],
+  ) => void
   /** 行级批量勾选（勾选条表头全选用）：一次 set 完成大量行的勾/取消 */
   setRowsChecked: (
     table: string,
@@ -195,7 +193,8 @@ export const useDataCompareStore = create<DataCompareState>((set, get) => ({
   targetStates: {},
   sourceDbs: [],
   loadingSourceDbs: false,
-  scopeAll: true,
+  // 默认按指定表对比，避免误操作全部表的数据
+  scopeAll: false,
   sourceTables: [],
   sourceTableList: [],
   tableKeys: [],
@@ -259,7 +258,9 @@ export const useDataCompareStore = create<DataCompareState>((set, get) => ({
     if (source.connectionId) {
       set({ loadingSourceDbs: true })
       try {
-        const dbs = await api.listDatabases(source.connectionId)
+        const dbs = await withSessionReconnect(source.connectionId, () =>
+          api.listDatabases(source.connectionId!),
+        )
         set({ sourceDbs: dbs, loadingSourceDbs: false })
       } catch {
         set({ loadingSourceDbs: false })
@@ -272,7 +273,9 @@ export const useDataCompareStore = create<DataCompareState>((set, get) => ({
           targets: s.targets.map((x) => (x.key === t.key ? { ...x, loadingDbs: true } : x)),
         }))
         try {
-          const dbs = await api.listDatabases(t.connectionId)
+          const dbs = await withSessionReconnect(t.connectionId, () =>
+            api.listDatabases(t.connectionId!),
+          )
           set((s) => ({
             targets: s.targets.map((x) =>
               x.key === t.key ? { ...x, dbs, loadingDbs: false } : x,
@@ -298,7 +301,7 @@ export const useDataCompareStore = create<DataCompareState>((set, get) => ({
       runSeq: s.runSeq + 1,
     }))
     try {
-      const dbs = await api.listDatabases(connectionId)
+      const dbs = await withSessionReconnect(connectionId, () => api.listDatabases(connectionId))
       set({ sourceDbs: dbs, loadingSourceDbs: false })
     } catch (e) {
       set({ loadingSourceDbs: false })
@@ -347,7 +350,7 @@ export const useDataCompareStore = create<DataCompareState>((set, get) => ({
       runSeq: s.runSeq + 1,
     }))
     try {
-      const dbs = await api.listDatabases(connectionId)
+      const dbs = await withSessionReconnect(connectionId, () => api.listDatabases(connectionId))
       set((s) => ({
         targets: s.targets.map((t) => (t.key === key ? { ...t, dbs, loadingDbs: false } : t)),
       }))
@@ -375,10 +378,12 @@ export const useDataCompareStore = create<DataCompareState>((set, get) => ({
     if (!source.connectionId || !source.database) return
     set({ loadingSourceTables: true })
     try {
-      const [tables, keys] = await Promise.all([
-        api.listTables(source.connectionId, source.database),
-        api.listTableKeys(source.connectionId, source.database),
-      ])
+      const [tables, keys] = await withSessionReconnect(source.connectionId, () =>
+        Promise.all([
+          api.listTables(source.connectionId!, source.database!),
+          api.listTableKeys(source.connectionId!, source.database!),
+        ]),
+      )
       set({ sourceTableList: tables, tableKeys: keys, loadingSourceTables: false })
     } catch {
       set({ sourceTableList: [], tableKeys: [], loadingSourceTables: false })
@@ -415,12 +420,15 @@ export const useDataCompareStore = create<DataCompareState>((set, get) => ({
         connectionId: t.connectionId!,
         database: t.database!,
       }))
-      const reports = await api.compareDataMulti(
-        source.connectionId,
-        source.database,
-        tables,
-        specs,
-        options,
+      const srcId = source.connectionId!
+      const reports = await withSessionReconnect(srcId, () =>
+        api.compareDataMulti(
+          srcId,
+          source.database!,
+          tables,
+          specs,
+          options,
+        ),
       )
       if (get().runSeq !== seq) return
 
@@ -432,7 +440,8 @@ export const useDataCompareStore = create<DataCompareState>((set, get) => ({
           ...emptyDataTargetState(),
           reportId: r.reportId,
           tables: r.tables,
-          selected: defaultSelected(r.tables),
+          // 默认全不选，由用户自行勾选要同步的数据
+          selected: [],
           error: r.error,
         }
       }
@@ -531,26 +540,35 @@ export const useDataCompareStore = create<DataCompareState>((set, get) => ({
 
   setRowFilter: (filter) => set((s) => patchActive(s, { rowFilter: filter })),
 
-  setRowChecked: (table, action, rowKey, checked) =>
+  setRowChecked: (table, action, rowKey, checked, siblingKeys = []) =>
     set((s) => {
       const cur = s.targetStates[s.activeTargetKey ?? '']
       if (!cur) return {}
       const id = selKey(table, action)
       const excluded = new Set(cur.uncheckedRows[id] ?? [])
-      const selected = checked
-        ? cur.selected.includes(id)
-          ? cur.selected
-          : [...cur.selected, id]
-        : cur.selected
       if (checked) {
+        // 类别整体未勾选时勾选其中一行 = 只选这一行：类别进入勾选态，
+        // 其余同类行全部计入排除清单（否则会连带选中所有同色行）
+        if (!cur.selected.includes(id)) {
+          for (const k of siblingKeys) {
+            if (k !== rowKey) excluded.add(k)
+          }
+          return patchActive(s, {
+            selected: [...cur.selected, id],
+            uncheckedRows: { ...cur.uncheckedRows, [id]: [...excluded] },
+          })
+        }
         excluded.delete(rowKey)
-      } else {
-        // 行级取消勾选时确保类别本身处于勾选态，excludeKeys 才有意义
-        if (!selected.includes(id)) return {}
-        excluded.add(rowKey)
+        return patchActive(s, {
+          selected: cur.selected,
+          uncheckedRows: { ...cur.uncheckedRows, [id]: [...excluded] },
+        })
       }
+      // 行级取消勾选时确保类别本身处于勾选态，excludeKeys 才有意义
+      if (!cur.selected.includes(id)) return {}
+      excluded.add(rowKey)
       return patchActive(s, {
-        selected,
+        selected: cur.selected,
         uncheckedRows: { ...cur.uncheckedRows, [id]: [...excluded] },
       })
     }),

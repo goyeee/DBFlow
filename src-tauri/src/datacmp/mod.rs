@@ -1280,7 +1280,7 @@ mod e2e {
             eprintln!("跳过（未设置 DBFLOW_E2E）");
             return;
         }
-        let a = connect(3306, "dbflow-a-2026").await;
+        let a = connect(3308, "dbflow-a-2026").await;
         let setup = [
             "DROP DATABASE IF EXISTS `dc_src`",
             "DROP DATABASE IF EXISTS `dc_tgt`",
@@ -1310,7 +1310,7 @@ mod e2e {
         let snap_t = a.snapshot_tables("dc_tgt", Some(&["t".into(), "nokey".into()])).await.unwrap();
         let opts = super::DataCompareOptions { chunk_size: 2, max_detail_rows: 100 };
 
-        // t：1 insert + 1 update + 1 delete（id=1 的 price 10.10 vs 10.1 归一化后不报差异）
+        // t：1 insert + 1 update + 1 delete；id=1 的 price 10.10 vs 10.1 归一化后相等 → equal
         let r = super::compare_table(
             &a, &a, "dc_src", "dc_tgt", "t",
             snap_s.tables.iter().find(|t| t.name == "t"),
@@ -1318,8 +1318,8 @@ mod e2e {
             &opts, &mut |_| {},
         ).await.expect("对比失败");
         assert_eq!(r.status, super::TableStatus::Different);
-        assert_eq!(r.counts, super::RowCounts { insert: 1, update: 1, delete: 1, equal: 0 },
-            "归一化后应只有 3 行真实差异: {:?}", r.counts);
+        assert_eq!(r.counts, super::RowCounts { insert: 1, update: 1, delete: 1, equal: 1 },
+            "归一化后应只有 3 行真实差异（id=1 相同计入 equal）: {:?}", r.counts);
         let upd = r.rows_data.iter().find(|x| x.action == super::RowAction::Update).unwrap();
         assert!(upd.changed.contains(&1), "name 列应变更");   // name
         assert!(upd.changed.contains(&2), "price 列应变更");  // price 20.00 vs 19.99
@@ -1364,7 +1364,7 @@ mod e2e {
             eprintln!("跳过（未设置 DBFLOW_E2E）");
             return;
         }
-        let a = connect(3306, "dbflow-a-2026").await;
+        let a = connect(3308, "dbflow-a-2026").await;
         let l56 = connect(3307, "123123").await;
         let setup56 = [
             "DROP DATABASE IF EXISTS `dc_xv`",

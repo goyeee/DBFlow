@@ -29,3 +29,25 @@ CREATE TABLE access_log (
   cost_ms INT NOT NULL DEFAULT 0 COMMENT '耗时(毫秒)',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB COMMENT='访问日志';
+
+-- 跨版本归一化测试用同构库（e2e_cross_version_normalized 期望 8.4 侧存在）
+CREATE DATABASE IF NOT EXISTS db_shop_xv DEFAULT CHARACTER SET utf8mb4;
+USE db_shop_xv;
+CREATE TABLE customer (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
+  name VARCHAR(64) NOT NULL COMMENT '客户姓名',
+  phone VARCHAR(20) DEFAULT NULL COMMENT '手机号',
+  level TINYINT NOT NULL DEFAULT 1 COMMENT '等级 1普通 2VIP 3SVIP',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_phone (phone)
+) ENGINE=InnoDB COMMENT='客户表';
+
+CREATE TABLE orders (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '订单号',
+  customer_id BIGINT UNSIGNED NOT NULL COMMENT '客户ID',
+  amount DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '金额',
+  status VARCHAR(16) NOT NULL DEFAULT 'created' COMMENT '状态',
+  PRIMARY KEY (id),
+  KEY idx_customer (customer_id)
+) ENGINE=InnoDB COMMENT='订单表';

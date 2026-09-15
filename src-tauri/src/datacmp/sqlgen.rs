@@ -21,7 +21,8 @@ pub fn literal(v: &Value) -> String {
         Value::Float(x) => x.to_string(),
         // 归一化十进制文本本身就是合法数值字面量
         Value::Decimal(s) => s.clone(),
-        Value::Text(s) | Value::Date(s) | Value::DateTime(s) | Value::Time(s) => quote_value(s),
+        Value::Text(s) | Value::Date(s) => quote_value(s),
+        Value::DateTime(s) | Value::Time(s) => quote_value(&trim_zero_fraction(s)),
         Value::Bytes(b) => {
             let mut s = String::with_capacity(2 + b.len() * 2);
             s.push_str("0x");
@@ -30,6 +31,22 @@ pub fn literal(v: &Value) -> String {
             }
             s
         }
+    }
+}
+
+/// 日期时间/时间文本的小数秒去尾零（全零则连同小数点一起去掉）：
+/// 读取层为消除精度差异统一用 DATE_FORMAT(...%f) 规范化成 6 位小数，
+/// 生成 SQL 时还原成等价但贴近源端书写习惯的字面量：
+/// '...16:51:43.000000' → '...16:51:43'，'...43.050000' → '...43.05'
+fn trim_zero_fraction(s: &str) -> String {
+    match s.rsplit_once('.') {
+        Some((head, frac)) if !frac.is_empty() && frac.bytes().all(|b| b.is_ascii_digit()) => {
+            match frac.trim_end_matches('0') {
+                "" => head.to_string(),
+                trimmed => format!("{head}.{trimmed}"),
+            }
+        }
+        _ => s.to_string(),
     }
 }
 
@@ -140,7 +157,25 @@ mod tests {
         assert_eq!(literal(&Value::Decimal("1.5".into())), "1.5");
         assert_eq!(literal(&Value::Text("a'b\\c\n".into())), "'a\\'b\\\\c\\n'");
         assert_eq!(literal(&Value::Bytes(vec![0xDE, 0xAD])), "0xDEAD");
-        assert_eq!(literal(&Value::DateTime("2026-09-04 10:00:00.000000".into())), "'2026-09-04 10:00:00.000000'");
+        // 读取层规范化补的 6 位小数秒，生成 SQL 时去尾零还原：全零去掉小数部分
+        assert_eq!(
+            literal(&Value::DateTime("2026-09-04 10:00:00.000000".into())),
+            "'2026-09-04 10:00:00'"
+        );
+        // 非零小数秒保留有效位
+        assert_eq!(
+            literal(&Value::DateTime("2026-09-04 10:00:00.050000".into())),
+            "'2026-09-04 10:00:00.05'"
+        );
+        assert_eq!(
+            literal(&Value::DateTime("2026-09-04 10:00:00.000001".into())),
+            "'2026-09-04 10:00:00.000001'"
+        );
+        // 无小数秒的原样保留
+        assert_eq!(
+            literal(&Value::DateTime("2026-09-04 10:00:00".into())),
+            "'2026-09-04 10:00:00'"
+        );
     }
 
     fn table_with_rows(rows: Vec<RowDiffData>) -> TableDataInternal {

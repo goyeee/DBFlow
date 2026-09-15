@@ -98,7 +98,13 @@ impl SshSession {
             seen_fingerprint: seen.clone(),
         };
 
-        let config = Arc::new(client::Config::default());
+        // keepalive：长空闲（NAT/防火墙掐连接、服务端踢空闲会话）后，
+        // 要么保住会话，要么在几次无响应后把 handle 置为 closed，
+        // 让 acquire 的活性检测能发现死隧道并重建，而不是一直复用导致所有查询 EOF
+        let mut config = client::Config::default();
+        config.keepalive_interval = Some(std::time::Duration::from_secs(15));
+        config.keepalive_max = 3;
+        let config = Arc::new(config);
         let mut handle = match client::connect(config, (ssh.host.as_str(), ssh.port), handler).await
         {
             Ok(h) => h,
@@ -202,6 +208,11 @@ impl SshSession {
         });
 
         Ok((local_port, task))
+    }
+
+    /// 会话是否仍然存活（服务端踢掉空闲会话/连接被掐断后 handle 会进入 closed）
+    pub fn is_alive(&self) -> bool {
+        !self.handle.is_closed()
     }
 
     /// 主动断开 SSH 会话（回收隧道时调用）

@@ -53,7 +53,8 @@ export function SqlView({ sql, emptyText }: { sql: string | null; emptyText: str
     <div className="sql-view">
       <pre className="sql-code">
         {sql.split('\n').map((ln, i) => (
-          <div key={i}>{highlightSqlLine(ln)}</div>
+          // 空行渲染 nbsp 占位：否则空行高度为 0，语句间看不出间隔
+          <div key={i}>{ln ? highlightSqlLine(ln) : '\u00A0'}</div>
         ))}
       </pre>
     </div>

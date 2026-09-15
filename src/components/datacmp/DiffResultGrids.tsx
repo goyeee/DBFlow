@@ -28,6 +28,7 @@ const selectableActions = (t: TableDataDiff): RowAction[] =>
 export function TableDiffGrid({
   tables,
   selected,
+  uncheckedRows,
   activeTable,
   onSelectTable,
   onToggleAction,
@@ -35,6 +36,8 @@ export function TableDiffGrid({
 }: {
   tables: TableDataDiff[]
   selected: string[]
+  /** 行级排除清单（`表:动作` → 被排除的行 key）：表级勾选框需据此联动显示 */
+  uncheckedRows: Record<string, string[]>
   activeTable: string | null
   onSelectTable: (table: string) => void
   onToggleAction: (table: string, action: RowAction, checked: boolean) => void
@@ -42,12 +45,24 @@ export function TableDiffGrid({
 }) {
   const comparable = (t: TableDataDiff) => t.status === 'different' || t.status === 'equal'
 
+  /** 类别勾选态（计入行级排除）：全排除视为未勾选，部分排除为半选 */
+  const actionState = (
+    t: TableDataDiff,
+    a: RowAction,
+  ): { checked: boolean; partial: boolean } => {
+    const id = `${t.table}:${a}`
+    if (!selected.includes(id) || t.counts[a] === 0) return { checked: false, partial: false }
+    const excluded = uncheckedRows[id]?.length ?? 0
+    if (excluded >= t.counts[a]) return { checked: false, partial: false }
+    return { checked: excluded === 0, partial: excluded > 0 }
+  }
+
   // 表头全选：作用于当前展示的全部「有差异」表的可勾选动作
-  const allIds = tables.flatMap((t) =>
-    t.status === 'different' ? selectableActions(t).map((a) => `${t.table}:${a}`) : [],
+  const allStates = tables.flatMap((t) =>
+    t.status === 'different' ? selectableActions(t).map((a) => actionState(t, a)) : [],
   )
-  const allChecked = allIds.length > 0 && allIds.every((id) => selected.includes(id))
-  const allSome = allIds.some((id) => selected.includes(id))
+  const allChecked = allStates.length > 0 && allStates.every((st) => st.checked)
+  const allSome = allStates.some((st) => st.checked || st.partial)
 
   const columns = [
     {
@@ -55,7 +70,7 @@ export function TableDiffGrid({
         <Checkbox
           checked={allChecked}
           indeterminate={!allChecked && allSome}
-          disabled={allIds.length === 0}
+          disabled={allStates.length === 0}
           onChange={(e) => {
             for (const t of tables) {
               if (t.status !== 'different') continue
@@ -68,9 +83,10 @@ export function TableDiffGrid({
       width: 36,
       render: (_: unknown, t: TableDataDiff) => {
         if (t.status !== 'different') return null
-        const ids = selectableActions(t).map((a) => `${t.table}:${a}`)
-        const checked = ids.length > 0 && ids.every((id) => selected.includes(id))
-        const some = ids.some((id) => selected.includes(id))
+        const acts = selectableActions(t)
+        const states = acts.map((a) => actionState(t, a))
+        const checked = states.length > 0 && states.every((st) => st.checked)
+        const some = states.some((st) => st.checked || st.partial)
         return (
           <Checkbox
             checked={checked}
@@ -107,26 +123,29 @@ export function TableDiffGrid({
     ...ACTIONS.map((action) => ({
       title: <span className={`dcmp-cat-${action}`}>{ACTION_TITLE[action]}</span>,
       key: action,
-      width: 92,
+      width: 110,
       render: (_: unknown, t: TableDataDiff) => {
-        const count = t.counts[action]
+        const total = t.counts[action]
         if (t.status !== 'different') return <span className="dcmp-count-zero">0</span>
-        if (count === 0) {
+        if (total === 0) {
           return (
             <Checkbox disabled checked={false}>
-              <span className="dcmp-count-zero">0</span>
+              <span className="dcmp-count-zero">0/0</span>
             </Checkbox>
           )
         }
-        const id = `${t.table}:${action}`
+        const excluded = uncheckedRows[`${t.table}:${action}`]?.length ?? 0
+        const checkedCount = Math.max(0, total - excluded)
+        const st = actionState(t, action)
         return (
           <Checkbox
-            checked={selected.includes(id)}
+            checked={st.checked}
+            indeterminate={st.partial}
             onChange={(e) => onToggleAction(t.table, action, e.target.checked)}
             className={`dcmp-cat dcmp-cat-${action}`}
           >
             <span className={action === 'delete' ? 'dcmp-delete-count' : undefined}>
-              {count.toLocaleString()}
+              {checkedCount}/{total}
             </span>
           </Checkbox>
         )
@@ -208,84 +227,32 @@ function buildPaneRows(preview: TableRowsPreview, filter: RowFilter): PaneRow[] 
     }))
 }
 
-/** 三区滚动同步：左右面板横纵互同步，行勾选窄条只跟随纵向（无横向内容） */
+/** 双面板滚动同步：横纵互同步 */
 function useSyncedScroll() {
   const leftRef = useRef<HTMLDivElement>(null)
   const rightRef = useRef<HTMLDivElement>(null)
-  const checksRef = useRef<HTMLDivElement>(null)
   const syncing = useRef(false)
-  const onScroll = (side: 'left' | 'right' | 'checks') => (e: React.UIEvent<HTMLDivElement>) => {
+  const onScroll = (side: 'left' | 'right') => (e: React.UIEvent<HTMLDivElement>) => {
     if (syncing.current) return
     syncing.current = true
     const src = e.currentTarget
-    const otherPane = side === 'left' ? rightRef.current : side === 'right' ? leftRef.current : null
-    // 纵向同步到所有区（勾选条 overflow hidden，仅被赋值）；横向只在两面板间同步
-    const targets: Array<HTMLDivElement | null> =
-      side === 'checks' ? [leftRef.current, rightRef.current] : [checksRef.current, otherPane]
-    for (const el of targets) {
-      if (!el) continue
-      el.scrollTop = src.scrollTop
-      if (el === otherPane) el.scrollLeft = src.scrollLeft
+    const other = side === 'left' ? rightRef.current : leftRef.current
+    if (other) {
+      other.scrollTop = src.scrollTop
+      other.scrollLeft = src.scrollLeft
     }
     syncing.current = false
   }
-  return { leftRef, rightRef, checksRef, onScroll }
+  return { leftRef, rightRef, onScroll }
 }
 
-function CheckStrip({
-  rows,
-  isRowChecked,
-  onRowChecked,
-  onToggleAll,
-  checksRef,
-  onScroll,
-}: {
-  rows: PaneRow[]
-  isRowChecked: (action: RowAction, rowKey: string) => boolean
-  onRowChecked: (action: RowAction, rowKey: string, checked: boolean) => void
+interface CheckColumnProps {
+  syncableCount: number
+  allChecked: boolean
+  someChecked: boolean
   onToggleAll: (checked: boolean) => void
-  checksRef: React.RefObject<HTMLDivElement | null>
-  onScroll: (e: React.UIEvent<HTMLDivElement>) => void
-}) {
-  const syncable = rows.filter((r) => r.action !== 'equal')
-  const checkedCount = syncable.filter((r) => isRowChecked(r.action, r.rowKey)).length
-  const allChecked = syncable.length > 0 && checkedCount === syncable.length
-  const some = checkedCount > 0
-  return (
-    <div className="dcmp-rowchecks">
-      <div className="dcmp-rowchecks-head dcmp-rowchecks-head-check">
-        <Checkbox
-          checked={allChecked}
-          indeterminate={!allChecked && some}
-          disabled={syncable.length === 0}
-          onChange={(e) => onToggleAll(e.target.checked)}
-        />
-      </div>
-      <div className="dcmp-rowchecks-scroll" ref={checksRef} onScroll={onScroll}>
-        <table className="dcmp-check-table">
-          {/* 占位表头：与数据面板的列头行等高，保证首行对齐 */}
-          <thead>
-            <tr>
-              <th className="dcmp-check-head-cell" />
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.rowKey} className={`dcmp-row-${r.action}`}>
-                <td>
-                  <Checkbox
-                    disabled={r.action === 'equal'}
-                    checked={r.action !== 'equal' && isRowChecked(r.action, r.rowKey)}
-                    onChange={(e) => onRowChecked(r.action, r.rowKey, e.target.checked)}
-                  />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  )
+  isRowChecked: (r: PaneRow) => boolean
+  onRowChecked: (r: PaneRow, checked: boolean) => void
 }
 
 function PaneTable({
@@ -295,6 +262,7 @@ function PaneTable({
   rows,
   scrollRef,
   onScroll,
+  checks,
 }: {
   side: 'src' | 'tgt'
   tableName: string
@@ -302,6 +270,8 @@ function PaneTable({
   rows: PaneRow[]
   scrollRef: React.RefObject<HTMLDivElement | null>
   onScroll: (e: React.UIEvent<HTMLDivElement>) => void
+  /** 源端面板首列的行勾选列（sticky，与数据原生同滚，永不错位） */
+  checks?: CheckColumnProps
 }) {
   return (
     <section className="dcmp-pane">
@@ -315,6 +285,16 @@ function PaneTable({
         <table className="dcmp-pane-table">
           <thead>
             <tr>
+              {checks && (
+                <th className="dcmp-check-col dcmp-check-col-head">
+                  <Checkbox
+                    checked={checks.allChecked}
+                    indeterminate={!checks.allChecked && checks.someChecked}
+                    disabled={checks.syncableCount === 0}
+                    onChange={(e) => checks.onToggleAll(e.target.checked)}
+                  />
+                </th>
+              )}
               {columns.map((c, i) => (
                 <th key={`${c}:${i}`}>{c}</th>
               ))}
@@ -323,6 +303,15 @@ function PaneTable({
           <tbody>
             {rows.map((r) => (
               <tr key={`${side}:${r.rowKey}`} className={`dcmp-row-${r.action}`}>
+                {checks && (
+                  <td className="dcmp-check-col">
+                    <Checkbox
+                      disabled={r.action === 'equal'}
+                      checked={r.action !== 'equal' && checks.isRowChecked(r)}
+                      onChange={(e) => checks.onRowChecked(r, e.target.checked)}
+                    />
+                  </td>
+                )}
                 {columns.map((_, i) => {
                   const arr = side === 'src' ? r.src : r.tgt
                   // 缺失侧留白（整行仍有插入/删除的背景色提示）
@@ -360,11 +349,17 @@ export function SideBySideDiff({
   filter: RowFilter
   onFilterChange: (f: RowFilter) => void
   isRowChecked: (action: RowAction, rowKey: string) => boolean
-  onRowChecked: (action: RowAction, rowKey: string, checked: boolean) => void
+  /** siblingKeys = 该动作类别的全部行 key（含筛选外），勾选未勾选类别中的一行时需要 */
+  onRowChecked: (
+    action: RowAction,
+    rowKey: string,
+    checked: boolean,
+    siblingKeys: string[],
+  ) => void
   /** 勾选条表头全选：作用于当前筛选出的可同步行 */
   onToggleAllRows: (checked: boolean) => void
 }) {
-  const { leftRef, rightRef, checksRef, onScroll } = useSyncedScroll()
+  const { leftRef, rightRef, onScroll } = useSyncedScroll()
 
   const rows = useMemo(() => {
     if (!preview) return []
@@ -384,6 +379,31 @@ export function SideBySideDiff({
     }
     return base
   }, [preview])
+
+  const syncable = rows.filter((r) => r.action !== 'equal')
+  const checkedCount = syncable.filter((r) => isRowChecked(r.action, r.rowKey)).length
+  // 每个动作类别的全部行 key（不受筛选影响）：勾选单行时用于排除同类其余行
+  const siblingsByAction = useMemo(() => {
+    const m = new Map<RowAction, string[]>()
+    if (preview) {
+      for (const r of preview.rows) {
+        if (r.action === 'equal') continue
+        const arr = m.get(r.action)
+        if (arr) arr.push(rowKeyOf(r.key))
+        else m.set(r.action, [rowKeyOf(r.key)])
+      }
+    }
+    return m
+  }, [preview])
+  const checkColumn: CheckColumnProps = {
+    syncableCount: syncable.length,
+    allChecked: syncable.length > 0 && checkedCount === syncable.length,
+    someChecked: checkedCount > 0,
+    onToggleAll: onToggleAllRows,
+    isRowChecked: (r) => isRowChecked(r.action, r.rowKey),
+    onRowChecked: (r, checked) =>
+      onRowChecked(r.action, r.rowKey, checked, siblingsByAction.get(r.action) ?? []),
+  }
 
   if (loading) {
     return (
@@ -422,15 +442,6 @@ export function SideBySideDiff({
         )}
       </div>
       <div className="dcmp-sbs-panes">
-        {/* 行勾选窄条：贴弹窗左侧、与源/目标数据隔开；表头为全选框 */}
-        <CheckStrip
-          rows={rows}
-          isRowChecked={isRowChecked}
-          onRowChecked={onRowChecked}
-          onToggleAll={onToggleAllRows}
-          checksRef={checksRef}
-          onScroll={onScroll('checks')}
-        />
         <PaneTable
           side="src"
           tableName={preview.table}
@@ -438,6 +449,7 @@ export function SideBySideDiff({
           rows={rows}
           scrollRef={leftRef}
           onScroll={onScroll('left')}
+          checks={checkColumn}
         />
         <div className="dcmp-sbs-divider" />
         <PaneTable

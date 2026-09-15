@@ -184,8 +184,8 @@ export function DataSyncModal() {
             block
             value={dc.scopeAll ? 'all' : 'tables'}
             options={[
-              { value: 'all', label: '全部表' },
               { value: 'tables', label: '指定表' },
+              { value: 'all', label: '全部表' },
             ]}
             onChange={(v) => dc.setScopeAll(v === 'all')}
           />
@@ -452,6 +452,7 @@ export function DataSyncModal() {
             ? diffTables
             : diffTables.filter((t) => t.status !== 'equal')}
           selected={activeState.selected}
+          uncheckedRows={activeState.uncheckedRows}
           activeTable={activeState.activeTable}
           onSelectTable={(name) => void dc.setActiveTable(name)}
           onToggleAction={(table, action, checked) =>
@@ -479,9 +480,9 @@ export function DataSyncModal() {
             !(activeState.uncheckedRows[id] ?? []).includes(rowKey)
           )
         }}
-        onRowChecked={(action, rowKey, checked) => {
+        onRowChecked={(action, rowKey, checked, siblingKeys) => {
           if (activeState.activeTable) {
-            dc.setRowChecked(activeState.activeTable, action, rowKey, checked)
+            dc.setRowChecked(activeState.activeTable, action, rowKey, checked, siblingKeys)
           }
         }}
         onToggleAllRows={(checked) => {
@@ -501,7 +502,7 @@ export function DataSyncModal() {
   const deleteCount = preview.filter((s) => s.action === 'delete').length
   const previewText = preview
     .slice(0, PREVIEW_RENDER_LIMIT)
-    .map((s) => s.sql)
+    .map((s) => s.sql.replace(/;\s*$/, ''))
     .join(';\n\n')
 
   const deployBody = (
@@ -633,7 +634,9 @@ export function DataSyncModal() {
       className="sync-schema-modal"
     >
       <div className="cmp-window" onContextMenu={(e) => e.preventDefault()}>
-        {dc.step === 'select' && <div className="cmp-step-title">选择数据库</div>}
+        <div className="cmp-step-title">
+          {dc.step === 'select' ? '选择数据库' : dc.step === 'diff' ? '对比结果' : '部署'}
+        </div>
         {summaryHeader}
 
         {dc.step === 'select' && (

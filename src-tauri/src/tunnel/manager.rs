@@ -60,7 +60,13 @@ impl TunnelManager {
 
         let mut map = self.map.lock().await;
         if let Some(entry) = map.get_mut(&key) {
-            if entry.refcount > 0 && !entry.accept_task.is_finished() {
+            // 复用条件：有引用 + 本地监听活着 + SSH 会话本体没死。
+            // 只查 accept_task 的话，服务端掐掉空闲 SSH 会话后本地监听还在，
+            // 会一直复用死隧道，经它发起的所有 MySQL 查询都报 EOF。
+            if entry.refcount > 0
+                && !entry.accept_task.is_finished()
+                && entry.session.as_ref().is_some_and(|s| s.is_alive())
+            {
                 entry.refcount += 1;
                 // 复用：取消空闲回收
                 if let Some(idle) = entry.idle_task.take() {
@@ -234,13 +240,13 @@ mod e2e_tests {
         // "用户确认后"带真实指纹重试 → 成功
         let lease = manager
             .acquire(&ssh_cfg(), "mysql-b", 3306, &cred, HostKeyPolicy {
-                trusted_fingerprint: Some(fingerprint),
+                trusted_fingerprint: Some(fingerprint.clone()),
                 use_known_hosts: false,
             })
             .await
             .expect("信任指纹后仍失败");
         let (host, port) = lease.endpoint();
-        let endpoint = ConnectEndpoint { host, port };
+        let endpoint = ConnectEndpoint { host: host.clone(), port };
         let pool = mysql::open_pool(&mysql_profile(), &endpoint, Some("dbflow-b-2026"))
             .await
             .expect("经隧道连接 mysql-b 失败");
@@ -255,6 +261,16 @@ mod e2e_tests {
         let tables = live.list_tables("db_log").await.expect("表列表");
         let tnames: Vec<&str> = tables.iter().map(|t| t.name.as_str()).collect();
         assert!(tnames.contains(&"error_log"), "mysql-b 独有表 error_log 不在: {tnames:?}");
+
+        // 存活会话必须被复用（活性检查不能误杀）：同 key 再次 acquire 端口不变
+        let lease2 = manager
+            .acquire(&ssh_cfg(), "mysql-b", 3306, &cred, HostKeyPolicy {
+                trusted_fingerprint: Some(fingerprint),
+                use_known_hosts: false,
+            })
+            .await
+            .expect("第二次 acquire 应复用存活隧道");
+        assert_eq!(lease2.endpoint(), (host, port), "存活隧道应复用同一本地端口");
 
         live.shutdown().await;
     }
