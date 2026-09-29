@@ -64,7 +64,6 @@ export function TitleBar() {
     <header className="titlebar" data-tauri-drag-region>
       <div className="titlebar-logo" data-tauri-drag-region="no-drag">
         <img src="/logo.png" alt="DBFlow" className="titlebar-logo-img" />
-        <span>DBFlow</span>
       </div>
       <Space size={2} className="titlebar-actions" data-tauri-drag-region="no-drag">
         <Tooltip title="新建连接" placement="bottom">
