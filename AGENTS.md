@@ -53,6 +53,8 @@ pnpm version <版本号>   # 例：pnpm version 0.2.3 或 0.2.3-beta.1
 - 打 tag 前确认远程没有同名 tag：`git tag -l` / `git ls-remote --tags origin`
 - 版本号格式为 `x.y.z` 或 `x.y.z-beta.N`（历史上曾误拼为 `beat`，已废弃，勿再用）
 - 构建进度可用 `gh run watch` 查看（需先 `gh auth login`）
+- Release Notes 由 workflow 的 `notes` job 自动生成（取 tag 之间的提交记录）并自动发布，无需手写；
+  因此**发版前的功能提交要写清楚提交信息**，它就是用户看到的更新日志
 
 ## 文档同步
 

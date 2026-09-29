@@ -56,3 +56,34 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+  # 构建全部成功后：用 tag 间的提交记录生成更新日志，填入草稿并发布
+  notes:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 填写 Release Notes 并发布
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          VER="${TAG#v}"
+          PREV=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+          if [ -n "$PREV" ]; then
+            LOG=$(git log --oneline --no-merges "${PREV}..${TAG}" | grep -v " ${VER}$" | sed 's/^[a-f0-9]* /- /')
+          else
+            LOG=$(git log --oneline --no-merges "${TAG}" | grep -v " ${VER}$" | head -30 | sed 's/^[a-f0-9]* /- /')
+          fi
+          gh release edit "$TAG" \
+            --title "DBFlow ${TAG}" \
+            --notes "## 更新内容
+
+          ${LOG:-维护性更新}" \
+            --draft=false
