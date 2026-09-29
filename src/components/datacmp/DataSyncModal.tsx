@@ -37,6 +37,7 @@ import { useSessionStore } from '../../stores/session'
 import type { DatabaseBrief, RowAction } from '../../api/types'
 import { errText } from '../connection/ConnectionTree'
 import { COLOR_PRESETS } from '../connection/colors'
+import { connFilterOption } from '../connection/connSelectSearch'
 import { SqlView } from '../compare/SqlView'
 import { SideBySideDiff, TableDiffGrid } from './DiffResultGrids'
 
@@ -68,6 +69,7 @@ export function DataSyncModal() {
       })),
     [connections, connected],
   )
+  const filterConn = connFilterOption(connections)
 
   const ensureConnected = async (connectionId: string): Promise<boolean> => {
     if (connected[connectionId]) return true
@@ -149,6 +151,8 @@ export function DataSyncModal() {
             placeholder={connectionOptions.length === 0 ? '请先创建一个连接' : '选择连接'}
             value={dc.source.connectionId ?? undefined}
             options={connectionOptions}
+            showSearch
+            filterOption={filterConn}
             onChange={async (v) => {
               const ok = await ensureConnected(v)
               if (!ok) return
@@ -263,6 +267,8 @@ export function DataSyncModal() {
               placeholder="选择连接"
               value={t.connectionId ?? undefined}
               options={connectionOptions}
+              showSearch
+              filterOption={filterConn}
               onChange={async (v) => {
                 const ok = await ensureConnected(v)
                 if (!ok) return
@@ -340,6 +346,8 @@ export function DataSyncModal() {
             placeholder={connectionOptions.length === 0 ? '请先创建一个连接' : '选择连接'}
             value={t0.connectionId ?? undefined}
             options={connectionOptions}
+            showSearch
+            filterOption={filterConn}
             onChange={async (v) => {
               const ok = await ensureConnected(v)
               if (!ok) return
@@ -485,11 +493,9 @@ export function DataSyncModal() {
             dc.setRowChecked(activeState.activeTable, action, rowKey, checked, siblingKeys)
           }
         }}
-        onToggleAllRows={(checked) => {
-          if (!activeState.activeTable || !activeDetail) return
-          const entries = activeDetail.rows
-            .filter((r) => r.action !== 'equal')
-            .map((r) => ({ action: r.action, rowKey: r.key.join('\u0001') }))
+        onToggleAllRows={(checked, entries) => {
+          if (!activeState.activeTable) return
+          // entries 已按当前筛选过滤（组件给出），筛选到某类别时全选不波及其他类别
           dc.setRowsChecked(activeState.activeTable, entries, checked)
         }}
       />

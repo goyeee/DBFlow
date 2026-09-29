@@ -173,6 +173,7 @@ export function TableDiffGrid({
     <Table<TableDataDiff>
       size="small"
       rowKey="table"
+      className="dcmp-grid"
       columns={columns as never}
       dataSource={tables}
       pagination={false}
@@ -180,7 +181,7 @@ export function TableDiffGrid({
         onClick: () => {
           if (comparable(t)) onSelectTable(t.table)
         },
-        style: comparable(t) ? { cursor: 'pointer' } : undefined,
+        // 行可点击（打开行级预览），但不用手型光标：结果数据区保持箭头指针
       })}
       rowClassName={(t) => (t.table === activeTable ? 'dcmp-table-active' : '')}
     />
@@ -356,8 +357,11 @@ export function SideBySideDiff({
     checked: boolean,
     siblingKeys: string[],
   ) => void
-  /** 勾选条表头全选：作用于当前筛选出的可同步行 */
-  onToggleAllRows: (checked: boolean) => void
+  /** 勾选列表头全选：作用于当前筛选出的可同步行（entries 即这些行，组件按当前筛选给出） */
+  onToggleAllRows: (
+    checked: boolean,
+    entries: { action: RowAction; rowKey: string }[],
+  ) => void
 }) {
   const { leftRef, rightRef, onScroll } = useSyncedScroll()
 
@@ -399,7 +403,12 @@ export function SideBySideDiff({
     syncableCount: syncable.length,
     allChecked: syncable.length > 0 && checkedCount === syncable.length,
     someChecked: checkedCount > 0,
-    onToggleAll: onToggleAllRows,
+    // 全选只作用于当前筛选出的行：筛选到"插入"时点全选不得连带勾上更新/删除的行
+    onToggleAll: (checked) =>
+      onToggleAllRows(
+        checked,
+        syncable.map((r) => ({ action: r.action, rowKey: r.rowKey })),
+      ),
     isRowChecked: (r) => isRowChecked(r.action, r.rowKey),
     onRowChecked: (r, checked) =>
       onRowChecked(r.action, r.rowKey, checked, siblingsByAction.get(r.action) ?? []),

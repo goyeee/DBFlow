@@ -50,6 +50,8 @@ pub enum DiffAction {
     Drop,
     Modify,
     Rename,
+    /// 两端完全一致，无需同步；仅供结果树展示与查看 DDL（sql 恒为 None，不可部署）
+    Noop,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -174,7 +176,13 @@ pub fn diff_snapshots(
             None => items.push(table_create(&target.database, s, &src_ddl)),
             Some(t) => {
                 let tgt_ddl = create_table_sql(&target.database, t);
-                items.extend(diff_table(&target.database, s, t, &src_ddl, &tgt_ddl, options));
+                let diffs = diff_table(&target.database, s, t, &src_ddl, &tgt_ddl, options);
+                if diffs.is_empty() {
+                    // 完全一致的表也返回：前端以"无操作"分组展示，可点击查看 DDL
+                    items.push(table_noop(s, t, &src_ddl, &tgt_ddl));
+                } else {
+                    items.extend(diffs);
+                }
             }
         }
     }
@@ -249,6 +257,24 @@ fn table_create(db: &str, s: &TableDef, src_ddl: &str) -> DiffItem {
         dangerous: false,
         source_ddl: Some(src_ddl.to_string()),
         target_ddl: None,
+    }
+}
+
+/// 两端一致的表 → 无操作项：不带 SQL，仅把双侧建表 DDL 带回去供查看
+fn table_noop(s: &TableDef, t: &TableDef, src_ddl: &str, tgt_ddl: &str) -> DiffItem {
+    DiffItem {
+        id: format!("noop:{}", s.name),
+        kind: DiffKind::Table,
+        action: DiffAction::Noop,
+        table: s.name.clone(),
+        name: s.name.clone(),
+        source_desc: Some(describe_table_options(s)),
+        target_desc: Some(describe_table_options(t)),
+        sql: None,
+        sql_clause: None,
+        dangerous: false,
+        source_ddl: Some(src_ddl.to_string()),
+        target_ddl: Some(tgt_ddl.to_string()),
     }
 }
 
@@ -626,7 +652,11 @@ mod tests {
             "5.6.40",
         );
         let items = diff(&src, &tgt);
-        assert!(items.is_empty(), "0900 系在低版本目标上不应产生差异: {items:?}");
+        // 归一化后等价 → 无可执行差异，只剩一条"无操作"项
+        assert!(ops(&items).is_empty(), "0900 系在低版本目标上不应产生差异: {items:?}");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].action, DiffAction::Noop);
+        assert!(items[0].sql.is_none());
     }
 
     #[test]
@@ -670,8 +700,9 @@ mod tests {
             "5.7.44",
         );
         let items = diff(&src, &tgt);
-        assert_eq!(items.len(), 1, "仅 t2 应有差异: {items:?}");
-        let sql = items[0].sql.as_deref().unwrap();
+        let real = ops(&items);
+        assert_eq!(real.len(), 1, "仅 t2 应有真实差异: {items:?}");
+        let sql = real[0].sql.as_deref().unwrap();
         assert!(sql.contains("utf8mb4_general_ci"), "{sql}");
         assert!(!sql.contains("0900"), "{sql}");
     }
@@ -704,8 +735,13 @@ mod tests {
         }
     }
 
+    /// 过滤掉"无操作"项：多数断言只关心需要执行的真实差异
+    fn ops(items: &[DiffItem]) -> Vec<&DiffItem> {
+        items.iter().filter(|i| i.action != DiffAction::Noop).collect()
+    }
+
     #[test]
-    fn identical_snapshots_produce_no_diff() {
+    fn identical_snapshots_produce_only_noop() {
         let a = snap(
             "src",
             vec![table(
@@ -715,7 +751,13 @@ mod tests {
             )],
         );
         let b = snap("tgt", a.tables.clone());
-        assert!(diff(&a, &b).is_empty());
+        // 完全一致 → 一条"无操作"项：不带 SQL，双侧 DDL 齐全供查看
+        let items = diff(&a, &b);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].action, DiffAction::Noop);
+        assert_eq!(items[0].id, "noop:t1");
+        assert!(items[0].sql.is_none());
+        assert!(items[0].source_ddl.is_some() && items[0].target_ddl.is_some());
     }
 
     #[test]
@@ -1173,7 +1215,10 @@ mod tests {
             ..Default::default()
         };
         let items = diff_snapshots(&src, &tgt, &opts);
-        assert!(items.is_empty(), "索引对比关闭时不应产生差异: {items:?}");
+        // 索引对比关闭时不产生索引差异；表无其他差异 → 只剩一条"无操作"项
+        assert!(ops(&items).is_empty(), "索引对比关闭时不应产生差异: {items:?}");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].action, DiffAction::Noop);
     }
 
     fn view(name: &str, definition: &str) -> ViewDef {
@@ -1417,10 +1462,10 @@ mod tests {
 
     #[test]
     fn ordinal_change_alone_is_not_a_diff() {
-        // 列对比忽略 ordinal：相同列集合（无论顺序）不产生差异
+        // 列对比忽略 ordinal：相同列集合（无论顺序）不产生可执行差异
         let t = table("t", vec![col("id", "int", false), col("x", "int", true)], vec![]);
         let items = diff(&snap("s", vec![t.clone()]), &snap("t", vec![t]));
-        assert!(items.is_empty());
+        assert!(ops(&items).is_empty());
     }
 
     #[test]
@@ -1437,13 +1482,14 @@ mod tests {
         let tgt = snap("tgt", vec![TableDef { name: "t".into(), columns: cols(), ..Default::default() }]);
         // 只要不平 panic 即可；ordinal 全 0 时无法判断位置，不产生位置差异
         let items = diff(&src, &tgt);
-        assert!(items.is_empty(), "{items:?}");
+        assert!(ops(&items).is_empty(), "{items:?}");
     }
 
     // ───────────────── e2e：docker/testenv（DBFLOW_E2E=1） ─────────────────
 
     mod e2e {
-        use super::diff;
+        use super::{diff, ops};
+        use crate::compare::DiffAction;
         use crate::config::model::{ConnectionProfile, DatabaseKind, SshAuth, SshTunnelConfig};
         use crate::datasource::mysql::{self, ConnectEndpoint, MySqlLive};
         use crate::datasource::LiveConnection;
@@ -1585,10 +1631,10 @@ mod tests {
                 tgt.execute(sql).await.unwrap_or_else(|e| panic!("执行失败 [{sql}]: {e}"));
             }
 
-            // 复比应为空
+            // 复比应无可执行差异（一致的表以"无操作"项出现）
             let snap_after = tgt.snapshot_schema("db_shop_old").await.expect("复比快照");
             let remain = diff(&snap_src, &snap_after);
-            assert!(remain.is_empty(), "部署后仍有差异: {:?}", remain.iter().map(|i| &i.id).collect::<Vec<_>>());
+            assert!(ops(&remain).is_empty(), "部署后仍有差异: {:?}", remain.iter().map(|i| &i.id).collect::<Vec<_>>());
 
             // 清理
             tgt.execute("DROP DATABASE `db_shop_old`").await.unwrap();
@@ -1763,10 +1809,13 @@ mod tests {
             let s56 = l56.snapshot_schema("db_shop_xv").await.unwrap();
             let items = diff(&s8, &s56);
             assert!(
-                items.is_empty(),
+                ops(&items).is_empty(),
                 "8.4 vs 5.6 同构库出现假差异: {:?}",
                 items.iter().map(|i| format!("{} [{}|{}]", i.id, i.source_desc.clone().unwrap_or_default(), i.target_desc.clone().unwrap_or_default())).collect::<Vec<_>>()
             );
+            // 同构表应全部以"无操作"项出现（供查看 DDL）
+            assert_eq!(items.len(), 2, "同构两表应各有一条无操作项: {items:?}");
+            assert!(items.iter().all(|i| i.action == DiffAction::Noop && i.sql.is_none()));
 
             l56.shutdown().await;
             l8.shutdown().await;
@@ -1810,7 +1859,10 @@ mod tests {
             live.execute(items[0].sql.as_deref().unwrap()).await.expect("5.6 建表部署失败");
 
             let b2 = live.snapshot_schema("dbflow_cmp_b").await.unwrap();
-            assert!(diff(&a, &b2).is_empty(), "5.6 部署后仍有差异");
+            let after = diff(&a, &b2);
+            assert!(ops(&after).is_empty(), "5.6 部署后仍有差异");
+            assert_eq!(after.len(), 1, "部署后的 t 应为无操作项: {after:?}");
+            assert_eq!(after[0].id, "noop:t");
 
             // 中文注释经 5.6 往返无损
             assert_eq!(b2.tables[0].comment.as_deref(), Some("测试表"));

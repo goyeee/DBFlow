@@ -33,6 +33,7 @@ import { useSessionStore } from '../../stores/session'
 import type { ConnectionProfile, DatabaseBrief } from '../../api/types'
 import { errText } from '../connection/ConnectionTree'
 import { COLOR_PRESETS } from '../connection/colors'
+import { connFilterOption } from '../connection/connSelectSearch'
 import { DiffTree } from './DiffTree'
 import { SqlView } from './SqlView'
 
@@ -68,6 +69,7 @@ export function SyncSchemaModal() {
       })),
     [connections, connected],
   )
+  const filterConn = connFilterOption(connections)
 
   /** 选择连接：若尚未建立会话则自动连接，失败时提示并终止 */
   const ensureConnected = async (connectionId: string): Promise<boolean> => {
@@ -118,8 +120,9 @@ export function SyncSchemaModal() {
   const activeItem = useMemo(() => {
     if (!cmp.activeTable) return null
     if (cmp.activeItemId) {
+      // 表级项（含 tblopt/rename/无操作）带双侧 DDL，可展示 DDL 比较；列/索引明细行不展示
       const item = (cmp.report ?? []).find((i) => i.id === cmp.activeItemId)
-      return item && item.id.startsWith('tbl:') ? item : null
+      return item && item.kind === 'table' ? item : null
     }
     return (cmp.report ?? []).find((i) => i.table === cmp.activeTable) ?? null
   }, [cmp.report, cmp.activeItemId, cmp.activeTable])
@@ -304,6 +307,8 @@ export function SyncSchemaModal() {
             placeholder={connectionOptions.length === 0 ? '请先创建一个连接' : '选择连接'}
             value={ep.connectionId ?? undefined}
             options={connectionOptions}
+            showSearch
+            filterOption={filterConn}
             onChange={async (v) => {
               const ok = await ensureConnected(v)
               if (!ok) return
@@ -419,6 +424,8 @@ export function SyncSchemaModal() {
             placeholder={connectionOptions.length === 0 ? '请先创建一个连接' : '选择连接'}
             value={ep.connectionId ?? undefined}
             options={connectionOptions}
+            showSearch
+            filterOption={filterConn}
             onChange={async (v) => {
               const ok = await ensureConnected(v)
               if (!ok) return
@@ -482,6 +489,8 @@ export function SyncSchemaModal() {
                 placeholder="选择连接"
                 value={t.connectionId ?? undefined}
                 options={connectionOptions}
+                showSearch
+                filterOption={filterConn}
                 onChange={async (v) => {
                   const ok = await ensureConnected(v)
                   if (!ok) return

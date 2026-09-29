@@ -156,18 +156,41 @@ describe('结构同步弹窗状态机', () => {
     expect(useCompareStore.getState().target.connectionId).toBe('c2')
   })
 
-  it('对比结果默认全不选，由用户自行勾选', async () => {
+  it('对比结果默认勾选非危险项，DROP 类不勾', async () => {
     openWithEndpoints()
     mockCompare.mockResolvedValue([item('a', 'create'), item('b', 'drop', true)])
     await useCompareStore.getState().runCompare()
-    expect(useCompareStore.getState().selectedIds).toEqual([])
+    expect(useCompareStore.getState().selectedIds).toEqual(['a'])
+  })
+
+  it('无操作项不进默认勾选，其分组默认不展开', async () => {
+    openWithEndpoints()
+    const noopItem: DiffItem = {
+      id: 'noop:t9',
+      kind: 'table',
+      action: 'noop',
+      table: 't9',
+      name: 't9',
+      sourceDesc: null,
+      targetDesc: null,
+      sql: null,
+      dangerous: false,
+      sourceDdl: null,
+      targetDdl: null,
+    }
+    mockCompare.mockResolvedValue([ditem('tbl:a', 'table', 'create', 'a', 'a'), noopItem])
+    await useCompareStore.getState().runCompare()
+    const s = useCompareStore.getState()
+    expect(s.selectedIds).toEqual(['tbl:a'])
+    // 分组行默认展开，但无操作分组收起（仅供偶尔查看）
+    expect(s.expandedKeys).toEqual(['grp:create'])
   })
 
   it('空选择不能进入部署页', async () => {
     openWithEndpoints()
     mockCompare.mockResolvedValue([item('b', 'drop', true)])
     await useCompareStore.getState().runCompare()
-    // 默认全不选 → 空选择
+    // 唯一的项是危险项，默认不勾 → 空选择
     useCompareStore.getState().gotoDeploy()
     expect(useCompareStore.getState().step).toBe('diff')
 
@@ -611,6 +634,34 @@ describe('buildDiffTree 结果页树构建', () => {
       ['tblopt:tA', 'col:tA:c1', 'idx:tA:i1', 'tbl:tB', 'tbl:tC', 'col:tD:c9'].sort(),
     )
   })
+
+  it('无操作项单独分组排在最后，叶子行两端同名，不参与勾选', () => {
+    const noopItem: DiffItem = {
+      id: 'noop:tZ',
+      kind: 'table',
+      action: 'noop',
+      table: 'tZ',
+      name: 'tZ',
+      sourceDesc: 'ENGINE=InnoDB',
+      targetDesc: 'ENGINE=InnoDB',
+      sql: null,
+      dangerous: false,
+      sourceDdl: 'CREATE TABLE `src`.`tZ` (...)'.replace('(...)', '(\n  `id` int\n)'),
+      targetDdl: 'CREATE TABLE `tgt`.`tZ` (...)'.replace('(...)', '(\n  `id` int\n)'),
+    }
+    const nodes = buildDiffTree([...fixture, noopItem], 'action')
+    expect(nodes.map((n) => n.key)).toEqual(['grp:modify', 'grp:create', 'grp:drop', 'grp:noop'])
+    expect(nodes[3].groupTitle).toBe('无操作的对象')
+
+    // 单条 noop 项 → 叶子行，两端同名可点开看 DDL
+    const leaf = nodes[3].children![0]
+    expect(leaf.nodeType).toBe('item')
+    expect(leaf.sourceName).toBe('tZ')
+    expect(leaf.targetName).toBe('tZ')
+
+    // 不可勾选：collectItemIds 不收集 noop 项
+    expect(collectItemIds(nodes)).not.toContain('noop:tZ')
+  })
 })
 
 describe('buildDeployStatements 部署语句合并', () => {
@@ -632,6 +683,26 @@ describe('buildDeployStatements 部署语句合并', () => {
     dangerous: action === 'drop',
     sourceDdl: null,
     targetDdl: null,
+  })
+
+  it('无操作项不带 SQL，混入也不产生部署语句', () => {
+    const noopItem: DiffItem = {
+      id: 'noop:t',
+      kind: 'table',
+      action: 'noop',
+      table: 't',
+      name: 't',
+      sourceDesc: null,
+      targetDesc: null,
+      sql: null,
+      dangerous: false,
+      sourceDdl: null,
+      targetDdl: null,
+    }
+    expect(buildDeployStatements([noopItem])).toEqual([])
+    expect(buildDeployStatements([col('col:t:a', 't', 'MODIFY COLUMN `a` int'), noopItem])).toEqual([
+      'ALTER TABLE `db`.`t` MODIFY COLUMN `a` int',
+    ])
   })
 
   it('同表多个列变更合并为一条 ALTER，子句按输入顺序用逗号连接', () => {

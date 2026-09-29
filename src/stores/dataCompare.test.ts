@@ -18,7 +18,9 @@ vi.mock('../api/commands', () => ({
 
 import { api } from '../api/commands'
 import {
+  defaultSelected,
   emptyDataTargetState,
+  selKey,
   toSelections,
   useDataCompareStore,
 } from './dataCompare'
@@ -70,6 +72,15 @@ function openMulti() {
 }
 
 describe('数据对比勾选逻辑', () => {
+  it('默认勾选 insert/update，delete 不勾', () => {
+    const tables = [tableDiff('a', 5, 3, 2), tableDiff('b', 0, 0, 0), tableDiff('c', 1)]
+    expect(defaultSelected(tables)).toEqual([
+      selKey('a', 'insert'),
+      selKey('a', 'update'),
+      selKey('c', 'insert'),
+    ])
+  })
+
   it('toSelections 解析 table:action（表名含冒号也安全）', () => {
     expect(toSelections(['my:table:delete', 't1:insert'])).toEqual([
       { table: 'my:table', action: 'delete' },
@@ -79,7 +90,7 @@ describe('数据对比勾选逻辑', () => {
 })
 
 describe('数据同步弹窗状态机', () => {
-  it('对比结果按目标分发，默认全不选，激活第一个目标进入结果页', async () => {
+  it('对比结果按目标分发，激活第一个目标进入结果页', async () => {
     openMulti()
     mockCompare.mockResolvedValue([
       report('k1', [tableDiff('t1', 2, 1)]),
@@ -91,8 +102,8 @@ describe('数据同步弹窗状态机', () => {
     expect(s.step).toBe('diff')
     expect(s.activeTargetKey).toBe('k1')
     expect(s.targetStates.k1.tables[0].counts.insert).toBe(2)
-    // 默认全不选，由用户自行勾选要同步的数据
-    expect(s.targetStates.k1.selected).toEqual([])
+    expect(s.targetStates.k1.selected).toEqual([selKey('t1', 'insert'), selKey('t1', 'update')])
+    // k2 只有 delete → 默认全不勾
     expect(s.targetStates.k2.selected).toEqual([])
     expect(mockCompare).toHaveBeenCalledWith(
       'c1', 'db1', ['t1'],
@@ -148,8 +159,6 @@ describe('数据同步弹窗状态机', () => {
     await useDataCompareStore.getState().runCompare()
 
     const dc = useDataCompareStore.getState()
-    // 默认全不选 → 显式勾上 insert + update 两类再验证行级排除
-    dc.setTableChecked('t1', ['insert', 'update'], true)
     // insert 默认全勾 → 取消一行
     dc.setRowChecked('t1', 'insert', '5', false)
     let st = useDataCompareStore.getState().targetStates.k1
@@ -176,7 +185,6 @@ describe('数据同步弹窗状态机', () => {
     mockCompare.mockResolvedValue([report('k1', [tableDiff('t1', 3)])])
     await useDataCompareStore.getState().runCompare()
     const dc = useDataCompareStore.getState()
-    dc.setTableChecked('t1', ['insert'], true)
 
     dc.setRowsChecked(
       't1',
@@ -206,7 +214,6 @@ describe('数据同步弹窗状态机', () => {
     mockCompare.mockResolvedValue([report('k1', [tableDiff('t1', 2)])])
     await useDataCompareStore.getState().runCompare()
     const dc = useDataCompareStore.getState()
-    dc.setTableChecked('t1', ['insert'], true)
     dc.setRowChecked('t1', 'insert', '5', false)
     expect(useDataCompareStore.getState().targetStates.k1.uncheckedRows['t1:insert']).toEqual(['5'])
 
@@ -243,12 +250,44 @@ describe('数据同步弹窗状态机', () => {
     )
   })
 
+  it('筛选到某类别后行级全选：只影响该类别的行，其他类别保持未勾', async () => {
+    openMulti()
+    mockCompare.mockResolvedValue([report('k1', [tableDiff('t1', 2, 1)])])
+    await useDataCompareStore.getState().runCompare()
+
+    const dc = useDataCompareStore.getState()
+    // 筛选=全部时点表头全选取消：insert/update 全部行的 key 进各自排除清单
+    dc.setRowsChecked(
+      't1',
+      [
+        { action: 'insert', rowKey: '1' },
+        { action: 'insert', rowKey: '2' },
+        { action: 'update', rowKey: '3' },
+      ],
+      false,
+    )
+    let st = useDataCompareStore.getState().targetStates.k1
+    expect(st.uncheckedRows['t1:insert']).toEqual(['1', '2'])
+    expect(st.uncheckedRows['t1:update']).toEqual(['3'])
+
+    // 切到"插入"筛选再点全选：只清 insert 的排除，update 的排除原样保留
+    dc.setRowsChecked(
+      't1',
+      [
+        { action: 'insert', rowKey: '1' },
+        { action: 'insert', rowKey: '2' },
+      ],
+      true,
+    )
+    st = useDataCompareStore.getState().targetStates.k1
+    expect(st.uncheckedRows['t1:insert']).toEqual([])
+    expect(st.uncheckedRows['t1:update']).toEqual(['3'])
+  })
+
   it('部署：预览 → 执行，结果写入当前目标', async () => {
     openMulti()
     mockCompare.mockResolvedValue([report('k1', [tableDiff('t1', 2)]), report('k2', [])])
     await useDataCompareStore.getState().runCompare()
-    // 默认全不选 → 用户自行勾选后再进入部署
-    useDataCompareStore.getState().setTableChecked('t1', ['insert'], true)
 
     const statements = [{ table: 't1', action: 'insert' as const, sql: 'INSERT ...' }]
     mockPreview.mockResolvedValue(statements)
