@@ -140,7 +140,7 @@ export interface NavicatImportResult {
 // ───────────────── 结构对比与同步 ─────────────────
 
 export type DiffKind = 'table' | 'column' | 'index' | 'view'
-export type DiffAction = 'create' | 'drop' | 'modify' | 'rename'
+export type DiffAction = 'create' | 'drop' | 'modify' | 'rename' | 'noop'
 
 export interface CompareOptions {
   /** 表永远对比；索引默认对比 */
@@ -150,7 +150,7 @@ export interface CompareOptions {
 }
 
 export interface DiffItem {
-  /** tbl:{表} / tblopt:{表} / col:{表}:{列} / idx:{表}:{索引} */
+  /** tbl:{表} / tblopt:{表} / col:{表}:{列} / idx:{表}:{索引} / noop:{表}（无操作） */
   id: string
   kind: DiffKind
   action: DiffAction

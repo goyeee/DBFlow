@@ -91,6 +91,17 @@ export const emptyDataTargetState = (): DataTargetState => ({
 
 const MAX_TARGETS = 8
 
+/** 默认勾选：insert/update 勾上，delete（破坏性）留给用户手动勾 */
+export function defaultSelected(tables: TableDataDiff[]): string[] {
+  const out: string[] = []
+  for (const t of tables) {
+    if (t.status !== 'different') continue
+    if (t.counts.insert > 0) out.push(selKey(t.table, 'insert'))
+    if (t.counts.update > 0) out.push(selKey(t.table, 'update'))
+  }
+  return out
+}
+
 /** 勾选列表 → 后端 SyncSelection */
 export function toSelections(selected: string[]): SyncSelection[] {
   return selected.map((s) => {
@@ -440,8 +451,7 @@ export const useDataCompareStore = create<DataCompareState>((set, get) => ({
           ...emptyDataTargetState(),
           reportId: r.reportId,
           tables: r.tables,
-          // 默认全不选，由用户自行勾选要同步的数据
-          selected: [],
+          selected: defaultSelected(r.tables),
           error: r.error,
         }
       }

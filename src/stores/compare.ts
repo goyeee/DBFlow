@@ -89,11 +89,12 @@ const GROUP_TITLES: Record<DiffAction, string> = {
   create: '要创建的对象',
   rename: '要重命名的对象',
   drop: '要删除的对象',
+  noop: '无操作的对象',
 }
-const ACTION_ORDER: DiffAction[] = ['modify', 'create', 'rename', 'drop']
+const ACTION_ORDER: DiffAction[] = ['modify', 'create', 'rename', 'drop', 'noop']
 const MAX_TARGETS = 8
 
-/** 单表叶子行（建表/删表/重命名）或明细行 */
+/** 单表叶子行（建表/删表/重命名/无操作）或明细行 */
 function leafFromItem(i: DiffItem): DiffNode {
   const isRename = i.action === 'rename'
   return {
@@ -111,11 +112,12 @@ function leafFromItem(i: DiffItem): DiffNode {
   }
 }
 
-/** 一张表的差异 → 表行。只有表级项（建/删/重命名表）时是叶子；否则父行挂列/索引明细。 */
+/** 一张表的差异 → 表行。只有表级项（建/删/重命名/无操作）时是叶子；否则父行挂列/索引明细。 */
 function tableNode(table: string, items: DiffItem[]): DiffNode {
   if (
     items.length === 1 &&
     (items[0].id === `tbl:${table}` ||
+      items[0].id === `noop:${table}` ||
       items[0].action === 'rename' ||
       items[0].kind === 'view')
   ) {
@@ -154,6 +156,7 @@ export function buildDiffTree(items: DiffItem[], mode: GroupMode): DiffNode[] {
     create: [],
     rename: [],
     drop: [],
+    noop: [],
   }
   for (const entry of groupByTable(items)) {
     const [table, its] = entry
@@ -163,6 +166,9 @@ export function buildDiffTree(items: DiffItem[], mode: GroupMode): DiffNode[] {
     } else if (its[0]?.kind === 'view') {
       // 视图没有表级项，直接按自身 action 入桶
       buckets[its[0].action].push(entry)
+    } else if (its[0]?.action === 'noop') {
+      // 无操作的表：整表只有一条 noop 项
+      buckets.noop.push(entry)
     } else {
       // 非表级差异（列/索引）默认归入 modify；rename 是特例：表级 rename 没有 tbl: 前缀
       const action = its[0]?.action === 'rename' ? 'rename' : 'modify'
@@ -184,17 +190,30 @@ export function buildDiffTree(items: DiffItem[], mode: GroupMode): DiffNode[] {
   return groups
 }
 
-/** 树中收集全部叶子项 id（勾选状态折算用） */
+/** 树中收集全部叶子项 id（勾选状态折算用）；无操作项不可勾选，不收集 */
 export function collectItemIds(nodes: DiffNode[]): string[] {
   const out: string[] = []
   const walk = (ns: DiffNode[]) => {
     for (const n of ns) {
-      if (n.itemId) out.push(n.itemId)
+      if (n.itemId && n.action !== 'noop') out.push(n.itemId)
       if (n.children) walk(n.children)
     }
   }
   walk(nodes)
   return out
+}
+
+/** 树中收集全部叶子行数（含不可勾选的无操作项），分组行计数展示用 */
+export function collectLeafCount(nodes: DiffNode[]): number {
+  let n = 0
+  const walk = (ns: DiffNode[]) => {
+    for (const x of ns) {
+      if (x.itemId) n += 1
+      if (x.children) walk(x.children)
+    }
+  }
+  walk(nodes)
+  return n
 }
 
 /** 按 action 分组（部署页统计等仍在用） */
@@ -265,10 +284,15 @@ export function buildDeployStatements(items: DiffItem[]): string[] {
   return out
 }
 
-/** 结果树默认展开的行 key：分组行默认展开，表行默认收起 */
+/** 默认勾选：非破坏性项；DROP 类留给用户手动勾；无操作项不可勾选 */
+function defaultSelected(items: DiffItem[]): string[] {
+  return items.filter((i) => !i.dangerous && i.action !== 'noop').map((i) => i.id)
+}
+
+/** 结果树默认展开的行 key：分组行默认展开（无操作分组除外），表行默认收起 */
 function defaultExpandedKeys(items: DiffItem[] | null, mode: GroupMode): string[] {
   return buildDiffTree(items ?? [], mode)
-    .filter((n) => n.nodeType === 'group')
+    .filter((n) => n.nodeType === 'group' && n.action !== 'noop')
     .map((n) => n.key)
 }
 
@@ -791,8 +815,7 @@ export const useCompareStore = create<CompareState>((set, get) => ({
       set((s) => ({
         report: visible,
         reportId: s.reportId + 1,
-        // 默认全不选，由用户自行勾选要同步的对象
-        selectedIds: [],
+        selectedIds: defaultSelected(visible),
         expandedKeys: defaultExpandedKeys(visible, s.groupMode),
         activeTable: null,
         activeItemId: null,
@@ -857,8 +880,7 @@ export const useCompareStore = create<CompareState>((set, get) => ({
         nextStates[t.key] = {
           report: visible,
           reportId: nextReportId,
-          // 默认全不选，由用户自行勾选要同步的对象
-          selectedIds: [],
+          selectedIds: defaultSelected(visible),
           expandedKeys: defaultExpandedKeys(visible, get().groupMode),
           activeTable: null,
           activeItemId: null,

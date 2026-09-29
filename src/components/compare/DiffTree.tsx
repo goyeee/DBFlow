@@ -4,6 +4,7 @@ import { ArrowRightOutlined, CaretRightFilled, TableOutlined } from '@ant-design
 import {
   buildDiffTree,
   collectItemIds,
+  collectLeafCount,
   useCompareStore,
   type DiffNode,
 } from '../../stores/compare'
@@ -49,23 +50,34 @@ export function DiffTree() {
     return activeTable === node.table && activeItemId === null
   }
 
-  /** 节点勾选态：叶子看自身；父行由子孙折算（全勾/半选/未勾） */
+  /** 节点勾选态：叶子看自身；父行由子孙折算（全勾/半选/未勾）。
+   *  无操作项不可勾选：可勾选 id 为空的行禁用勾选框 */
   const checkState = (node: DiffNode) => {
     const ids = node.itemId ? [node.itemId] : collectItemIds(node.children ?? [])
     const n = ids.filter((id) => selectedSet.has(id)).length
     return {
       checked: ids.length > 0 && n === ids.length,
       indeterminate: n > 0 && n < ids.length,
+      disabled: ids.length === 0,
     }
   }
 
   const toggleNode = (node: DiffNode, checked: boolean) => {
     const ids = node.itemId ? [node.itemId] : collectItemIds(node.children ?? [])
+    if (ids.length === 0) return
     setItemsChecked(ids, checked)
   }
 
-  /** 分组行标题列：标题 + 已选择/共 n 个 */
+  /** 分组行标题列：标题 + 已选择/共 n 个（无操作分组没有勾选概念，只展示数量） */
   const groupTitle = (node: DiffNode) => {
+    if (node.action === 'noop') {
+      const n = collectLeafCount(node.children ?? [])
+      return (
+        <span className="dt-group-title dt-group-noop">
+          {node.groupTitle}（{n} 个）
+        </span>
+      )
+    }
     const ids = collectItemIds(node.children ?? [])
     const sel = ids.filter((id) => selectedSet.has(id)).length
     return (
@@ -135,6 +147,7 @@ export function DiffTree() {
               <Checkbox
                 checked={st.checked}
                 indeterminate={st.indeterminate}
+                disabled={st.disabled}
                 onChange={(e) => toggleNode(node, e.target.checked)}
               />
             </span>
@@ -171,7 +184,15 @@ export function DiffTree() {
           key: 'op',
           width: 52,
           align: 'center',
-          render: () => <ArrowRightOutlined style={{ color: '#1677ff', fontSize: 12 }} />,
+          render: (_, node) => (
+            <ArrowRightOutlined
+              style={{
+                color:
+                  node.nodeType !== 'group' && node.action === 'noop' ? '#c0c0c0' : '#1677ff',
+                fontSize: 12,
+              }}
+            />
+          ),
         },
         {
           title: '目标对象',

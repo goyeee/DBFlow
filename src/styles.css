@@ -623,9 +623,17 @@ textarea,
   background: #4a90d9;
 }
 
-/* 紧凑行距 + 小字号（Navicat 风，行高 ~20px） */
+/* 紧凑行距 + 小字号（Navicat 风） */
 .diff-tree .ant-table {
   font-size: 11.5px;
+}
+
+/* 对比结果数据区统一箭头光标：不显示文本 I 型光标（SQL/DDL 视图不受此影响，仍可选中复制） */
+.diff-tree,
+.dcmp-grid,
+.dcmp-pane-table,
+.dcmp-cell-diff {
+  cursor: default;
 }
 
 .diff-tree .ant-table-thead > tr > th {
@@ -636,21 +644,27 @@ textarea,
   background: #fff;
 }
 
+/* 行高与数据对比结果行一致（22px） */
 .diff-tree .ant-table-tbody > tr > td {
-  padding: 1px 6px;
+  padding: 0 6px;
+  height: 22px;
+  line-height: 20px;
 }
 
 .diff-tree .ant-table-tbody > tr:hover > td {
   background: #f5f5f5;
 }
 
-.diff-tree .ant-table-row {
-  cursor: pointer;
-}
+/* 结果树行可点击（选中看 DDL），但不用手型光标：数据区保持箭头指针 */
 
 .dt-group-title {
   font-weight: 600;
   font-size: 11.5px;
+}
+
+/* 无操作分组：灰色弱化，与可部署的操作分组区分 */
+.dt-group-noop {
+  color: #999;
 }
 
 /* 只有点击选中的行给背景（Navicat 深蓝底白字）；勾选不染色 */
@@ -1127,18 +1141,18 @@ textarea,
   top: 0;
   z-index: 2;
   box-sizing: border-box;
-  height: 26px;
+  height: 24px;
   padding: 0 8px;
   background: #fafafa;
   font-weight: 600;
-  line-height: 24px;
+  line-height: 22px;
   border-bottom: 1px solid #e8e8e8;
 }
-/* 数据行：border-box 定高 24px */
+/* 数据行：border-box 定高 22px（Navicat 式紧凑行） */
 .dcmp-pane-table tbody td {
-  height: 24px;
+  height: 22px;
   padding: 0 8px;
-  line-height: 22px;
+  line-height: 20px;
 }
 .dcmp-equal-text {
   color: #aaa;
@@ -1152,6 +1166,17 @@ textarea,
 }
 .dcmp-table-active > td {
   background: #e6f4ff !important;
+}
+
+/* 数据对比表清单：紧凑行高（与结构对比结果树一致，22px） */
+.dcmp-grid .ant-table-tbody > tr > td {
+  padding: 0 8px;
+  height: 22px;
+  line-height: 20px;
+}
+
+.dcmp-grid .ant-table-thead > tr > th {
+  padding: 3px 8px;
 }
 .dcmp-cat-zero {
   color: #bbb;
