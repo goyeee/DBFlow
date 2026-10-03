@@ -207,25 +207,42 @@ pub fn create_table_sql(db: &str, t: &TableDef) -> String {
     sql
 }
 
-/// 外键 DDL（ER 图导出 DDL 用；同步流程暂不涉及外键）
+/// 外键 DDL（ER 图导出 DDL / ER 建模应用用）
 pub fn foreign_key_ddl(db: &str, fk: &ForeignKeyDef) -> String {
+    format!(
+        "ALTER TABLE {} {}",
+        qualified(db, &fk.table),
+        add_foreign_key_clause(db, fk)
+    )
+}
+
+/// ADD CONSTRAINT 子句（不含 ALTER TABLE 前缀），供整句与重建语句复用
+pub fn add_foreign_key_clause(db: &str, fk: &ForeignKeyDef) -> String {
     let cols = fk.columns.iter().map(|c| quote_ident(c)).collect::<Vec<_>>().join(", ");
     let ref_cols = fk.ref_columns.iter().map(|c| quote_ident(c)).collect::<Vec<_>>().join(", ");
-    let mut sql = format!(
-        "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
-        qualified(db, &fk.table),
+    let mut s = format!(
+        "ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
         quote_ident(&fk.name),
         cols,
         qualified(db, &fk.ref_table),
         ref_cols
     );
     if let Some(d) = &fk.on_delete {
-        sql.push_str(&format!(" ON DELETE {d}"));
+        s.push_str(&format!(" ON DELETE {d}"));
     }
     if let Some(u) = &fk.on_update {
-        sql.push_str(&format!(" ON UPDATE {u}"));
+        s.push_str(&format!(" ON UPDATE {u}"));
     }
-    sql
+    s
+}
+
+/// DROP FOREIGN KEY 语句
+pub fn drop_foreign_key_ddl(db: &str, table: &str, fk_name: &str) -> String {
+    format!(
+        "ALTER TABLE {} DROP FOREIGN KEY {}",
+        qualified(db, table),
+        quote_ident(fk_name)
+    )
 }
 
 /// ADD 子句（不含 ALTER TABLE 前缀），供同表多个列变更合并为一条 ALTER 时复用
@@ -389,6 +406,28 @@ mod tests {
         assert_eq!(
             foreign_key_ddl("db", &fk("fk_multi", "t1", &["a", "b"], "t2", &["x", "y"], None, None)),
             "ALTER TABLE `db`.`t1` ADD CONSTRAINT `fk_multi` FOREIGN KEY (`a`, `b`) REFERENCES `db`.`t2` (`x`, `y`)"
+        );
+    }
+
+    #[test]
+    fn drop_and_add_foreign_key_clauses() {
+        use crate::datasource::ForeignKeyDef;
+        let fk = ForeignKeyDef {
+            name: "fk_order".into(),
+            table: "order_items".into(),
+            columns: vec!["order_id".into()],
+            ref_table: "orders".into(),
+            ref_columns: vec!["id".into()],
+            on_delete: Some("CASCADE".into()),
+            on_update: None,
+        };
+        assert_eq!(
+            drop_foreign_key_ddl("db", &fk.table, &fk.name),
+            "ALTER TABLE `db`.`order_items` DROP FOREIGN KEY `fk_order`"
+        );
+        assert_eq!(
+            add_foreign_key_clause("db", &fk),
+            "ADD CONSTRAINT `fk_order` FOREIGN KEY (`order_id`) REFERENCES `db`.`orders` (`id`) ON DELETE CASCADE"
         );
     }
 
