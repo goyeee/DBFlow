@@ -8,7 +8,8 @@ use serde::Deserialize;
 
 use crate::datasource::{ForeignKeyDef, TableDef};
 use crate::compare::sqlgen::{
-    add_foreign_key_clause, drop_foreign_key_ddl, foreign_key_ddl, qualified, quote_ident,
+    add_foreign_key_clause, column_ddl, describe_column, drop_foreign_key_ddl, foreign_key_ddl,
+    qualified, quote_ident,
 };
 use crate::compare::{diff_snapshots, CompareOptions, DiffAction, DiffItem, DiffKind};
 use crate::datasource::{
@@ -381,9 +382,52 @@ pub fn diff_model_vs_db(
     };
 
     let opts = CompareOptions { compare_indexes: true, compare_views: false };
+
+    // 列改名检测：同表、同位置、除名字外定义完全一致 → 一条 CHANGE COLUMN
+    //（保数据、非危险）。否则改名会落成「加列 + 删列」，删列是危险项默认不勾，
+    // 应用后旧列仍在——用户看来就是改名没生效
+    let mut col_renames: Vec<(String, String, String, crate::datasource::ColumnDef)> = Vec::new();
+    for mt in &m.snapshot.tables {
+        let Some(lt) = target
+            .tables
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case(&mt.name))
+        else {
+            continue
+        };
+        for (idx, mc) in mt.columns.iter().enumerate() {
+            if lt.columns.iter().any(|lc| lc.name.eq_ignore_ascii_case(&mc.name)) {
+                continue // 两端都有，不算改名
+            }
+            let Some(lc) = lt.columns.get(idx) else { continue };
+            if mt.columns.iter().any(|c| c.name.eq_ignore_ascii_case(&lc.name)) {
+                continue // 旧名在模型里仍存在（另加的列撞位置），不配对
+            }
+            let def_eq = |a: &crate::datasource::ColumnDef, b: &crate::datasource::ColumnDef| {
+                a.data_type == b.data_type
+                    && a.nullable == b.nullable
+                    && a.default == b.default
+                    && a.extra == b.extra
+                    && a.comment == b.comment
+                    && a.character_set == b.character_set
+                    && a.collation == b.collation
+            };
+            if def_eq(mc, lc) {
+                col_renames.push((mt.name.clone(), lc.name.clone(), mc.name.clone(), mc.clone()));
+            }
+        }
+    }
+    let is_paired_col = |i: &DiffItem| -> bool {
+        col_renames.iter().any(|(t, old, new, _)| {
+            i.kind == DiffKind::Column
+                && i.table.eq_ignore_ascii_case(t)
+                && (i.name.eq_ignore_ascii_case(old) || i.name.eq_ignore_ascii_case(new))
+        })
+    };
+
     let mut items: Vec<DiffItem> = diff_snapshots(&m.snapshot, &target, &opts)
         .into_iter()
-        .filter(|i| i.action != DiffAction::Noop)
+        .filter(|i| i.action != DiffAction::Noop && !is_paired_col(i))
         .flat_map(|i| {
             // ER 不做重命名推断：rename 项拆回 DROP(旧) + CREATE(新)，与模型表达一致。
             // 两端同库，source_ddl 就是可直接执行的 CREATE 语句
@@ -428,6 +472,29 @@ pub fn diff_model_vs_db(
             }
         })
         .collect();
+
+    for (table, old, new, def) in &col_renames {
+        items.push(DiffItem {
+            id: format!("col:{}:{}", table, new),
+            kind: DiffKind::Column,
+            action: DiffAction::Rename,
+            table: table.clone(),
+            name: new.clone(),
+            source_desc: Some(describe_column(def)),
+            target_desc: Some(describe_column(def)),
+            sql: Some(format!(
+                "ALTER TABLE {} CHANGE COLUMN {} {}",
+                qualified(db, table),
+                quote_ident(old),
+                column_ddl(def)
+            )),
+            sql_clause: None,
+            dangerous: false,
+            source_ddl: None,
+            target_ddl: None,
+            ref_table: None,
+        });
+    }
 
     items.extend(diff_foreign_keys(
         db,
@@ -914,6 +981,36 @@ mod tests {
         let d = fkd("fk_uid", "orders", &["uid"], "users", &["id"]);
         let items = diff_foreign_keys("db", &model_tables, &[m], &[d], &HashSet::new());
         assert!(items.is_empty(), "{items:?}");
+    }
+
+    #[test]
+    fn column_rename_detected_as_change() {
+        // 用户在设计器里只改列名：同位置、除名字外定义一致 → 一条 CHANGE COLUMN
+        //（保数据、非危险），而不是「加列 + 删列(危险默认不勾，应用后旧列还在)」
+        let l = snap_of("db", vec![tbl("t", &[("id", "int"), ("name", "varchar(20)")])]);
+        let mut model = input("t", &[("id", "int"), ("title", "varchar(20)")], &[]);
+        let m = build_model_snapshot("db", &[model.clone()], &l);
+        let _ = m;
+        let items = full_model_diff("db", &[model], &l, &[]);
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["col:t:title"], "{ids:?}");
+        let r = &items[0];
+        assert_eq!(r.action, DiffAction::Rename);
+        assert!(!r.dangerous);
+        let sql = r.sql.as_deref().unwrap();
+        assert!(sql.contains("ALTER TABLE `db`.`t` CHANGE COLUMN `name` `title` varchar(20)"), "{sql}");
+    }
+
+    #[test]
+    fn column_rename_not_matched_when_definition_differs() {
+        // 改名同时改了类型 → 不是改名对，走加列+删列
+        let l = snap_of("db", vec![tbl("t", &[("id", "int"), ("name", "varchar(20)")])]);
+        let model = input("t", &[("id", "int"), ("title", "varchar(64)")], &[]);
+        let items = full_model_diff("db", &[model], &l, &[]);
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["col:t:title", "col:t:name"], "{ids:?}");
+        assert_eq!(items[0].action, DiffAction::Create);
+        assert_eq!(items[1].action, DiffAction::Drop);
     }
 
     #[test]

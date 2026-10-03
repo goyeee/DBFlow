@@ -14,7 +14,7 @@ type Step = 'diff' | 'done'
 /** 差异操作文案按对象类型细化：对已有表加列是「加列」，不是「新建」 */
 const ACTION_TEXT: Record<string, Record<string, string>> = {
   table: { create: '新建表', drop: '删表', modify: '改表', rename: '改名', noop: '无操作' },
-  column: { create: '加列', drop: '删列', modify: '改列', noop: '无操作' },
+  column: { create: '加列', drop: '删列', modify: '改列', rename: '改列名', noop: '无操作' },
   index: { create: '加索引', drop: '删索引', modify: '改索引', noop: '无操作' },
   foreignKey: { create: '加外键', drop: '删外键', modify: '改外键', noop: '无操作' },
   view: { create: '建视图', drop: '删视图', modify: '改视图', noop: '无操作' },
