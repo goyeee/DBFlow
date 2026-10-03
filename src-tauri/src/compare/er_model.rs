@@ -7,6 +7,10 @@ use std::collections::{HashMap, HashSet};
 use serde::Deserialize;
 
 use crate::datasource::{ForeignKeyDef, TableDef};
+use crate::compare::sqlgen::{
+    add_foreign_key_clause, drop_foreign_key_ddl, foreign_key_ddl, qualified, quote_ident,
+};
+use crate::compare::{DiffAction, DiffItem, DiffKind};
 use crate::datasource::SchemaSnapshot;
 use crate::error::{AppError, AppResult};
 
@@ -163,6 +167,131 @@ pub fn validate_model_payload(tables: &[ErModelTableInput]) -> AppResult<()> {
     Ok(())
 }
 
+/// FK 形态描述（UI 差异树用）
+fn describe_fk(fk: &ForeignKeyDef) -> String {
+    let mut s = format!(
+        "{}({}) → {}({})",
+        fk.table,
+        fk.columns.join(","),
+        fk.ref_table,
+        fk.ref_columns.join(",")
+    );
+    if let Some(d) = &fk.on_delete {
+        s.push_str(&format!(" ON DELETE {d}"));
+    }
+    if let Some(u) = &fk.on_update {
+        s.push_str(&format!(" ON UPDATE {u}"));
+    }
+    s
+}
+
+fn fk_item(
+    action: DiffAction,
+    fk: &ForeignKeyDef,
+    sql: String,
+    dangerous: bool,
+    source_ddl: Option<String>,
+    target_ddl: Option<String>,
+    source_desc: Option<String>,
+    target_desc: Option<String>,
+) -> DiffItem {
+    DiffItem {
+        id: format!("fk:{}:{}", fk.table, fk.name),
+        kind: DiffKind::ForeignKey,
+        action,
+        table: fk.table.clone(),
+        name: fk.name.clone(),
+        source_desc,
+        target_desc,
+        sql: Some(sql),
+        sql_clause: None,
+        dangerous,
+        source_ddl,
+        target_ddl,
+        // 前端「勾选删表 → 自动勾选其前置 DROP FK」联动依赖此字段
+        ref_table: Some(fk.ref_table.clone()),
+    }
+}
+
+/// 模型外键 vs 库外键：
+/// - FK 所在表 ∈ 模型 schema 表集：按（表, 约束名）匹配，模型有库无 → ADD，
+///   库有模型无 → DROP（dangerous），都有但定义不同 → 一条 ALTER DROP+ADD 重建
+/// - 库 FK 引用任一 tombstone 表 → 一律 DROP（删表的必然后果；所在表可以不是模型表）
+/// - 其余（非模型表且不引用 tombstone）→ 不动
+pub fn diff_foreign_keys(
+    db: &str,
+    model_tables: &HashSet<String>,
+    model_fks: &[ForeignKeyDef],
+    db_fks: &[ForeignKeyDef],
+    tombstones: &HashSet<String>,
+) -> Vec<DiffItem> {
+    let model_idx: std::collections::BTreeMap<(String, String), &ForeignKeyDef> = model_fks
+        .iter()
+        .map(|fk| ((fk.table.to_lowercase(), fk.name.to_lowercase()), fk))
+        .collect();
+    let mut handled: HashSet<(String, String)> = HashSet::new();
+    let mut items = Vec::new();
+
+    for fk in db_fks {
+        let key = (fk.table.to_lowercase(), fk.name.to_lowercase());
+        match model_idx.get(&key) {
+            Some(m) => {
+                handled.insert(key);
+                if **m != *fk {
+                    // 定义变化：一条 ALTER 同时 DROP 旧 + ADD 新（照索引重建模式）
+                    items.push(fk_item(
+                        DiffAction::Modify,
+                        m,
+                        format!(
+                            "ALTER TABLE {} DROP FOREIGN KEY {}, {}",
+                            qualified(db, &m.table),
+                            quote_ident(&fk.name),
+                            add_foreign_key_clause(db, m)
+                        ),
+                        false,
+                        Some(foreign_key_ddl(db, m)),
+                        Some(foreign_key_ddl(db, fk)),
+                        Some(describe_fk(m)),
+                        Some(describe_fk(fk)),
+                    ));
+                }
+            }
+            None => {
+                let in_model_table = model_tables.contains(&fk.table.to_lowercase());
+                let refs_tombstone = tombstones.contains(&fk.ref_table.to_lowercase());
+                if in_model_table || refs_tombstone {
+                    items.push(fk_item(
+                        DiffAction::Drop,
+                        fk,
+                        drop_foreign_key_ddl(db, &fk.table, &fk.name),
+                        true,
+                        None,
+                        Some(foreign_key_ddl(db, fk)),
+                        None,
+                        Some(describe_fk(fk)),
+                    ));
+                }
+            }
+        }
+    }
+    for (key, m) in &model_idx {
+        if handled.contains(key) {
+            continue;
+        }
+        items.push(fk_item(
+            DiffAction::Create,
+            m,
+            foreign_key_ddl(db, m),
+            false,
+            Some(foreign_key_ddl(db, m)),
+            None,
+            Some(describe_fk(m)),
+            None,
+        ));
+    }
+    items
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,6 +402,119 @@ mod tests {
     }
 
     use crate::datasource::{ColumnDef, SchemaSnapshot, TableDef};
+
+    fn fkd(name: &str, table: &str, cols: &[&str], rt: &str, rc: &[&str]) -> ForeignKeyDef {
+        ForeignKeyDef {
+            name: name.into(),
+            table: table.into(),
+            columns: cols.iter().map(|s| s.to_string()).collect(),
+            ref_table: rt.into(),
+            ref_columns: rc.iter().map(|s| s.to_string()).collect(),
+            on_delete: None,
+            on_update: None,
+        }
+    }
+
+    fn fk_ids(items: &[crate::compare::DiffItem]) -> Vec<String> {
+        items.iter().map(|i| i.id.clone()).collect()
+    }
+
+    #[test]
+    fn fk_add_when_model_only() {
+        let model_tables: HashSet<String> = ["orders"].iter().map(|s| s.to_string()).collect();
+        let items = diff_foreign_keys(
+            "db",
+            &model_tables,
+            &[fkd("fk_uid", "orders", &["uid"], "users", &["id"])],
+            &[],
+            &HashSet::new(),
+        );
+        assert_eq!(fk_ids(&items), vec!["fk:orders:fk_uid"]);
+        assert_eq!(items[0].action, crate::compare::DiffAction::Create);
+        assert!(!items[0].dangerous);
+        assert_eq!(
+            items[0].sql.as_deref(),
+            Some("ALTER TABLE `db`.`orders` ADD CONSTRAINT `fk_uid` FOREIGN KEY (`uid`) REFERENCES `db`.`users` (`id`)")
+        );
+        assert!(items[0].source_ddl.is_some() && items[0].target_ddl.is_none());
+        // FK 项带 ref_table：前端「删表 → 前置删 FK」勾选联动用它
+        assert_eq!(items[0].ref_table.as_deref(), Some("users"));
+    }
+
+    #[test]
+    fn fk_drop_when_model_table_edited_and_fk_removed() {
+        // 模型编辑了 orders 但删掉了它的 FK → DROP（dangerous）
+        let model_tables: HashSet<String> = ["orders"].iter().map(|s| s.to_string()).collect();
+        let items = diff_foreign_keys(
+            "db",
+            &model_tables,
+            &[],
+            &[fkd("fk_uid", "orders", &["uid"], "users", &["id"])],
+            &HashSet::new(),
+        );
+        assert_eq!(fk_ids(&items), vec!["fk:orders:fk_uid"]);
+        assert_eq!(items[0].action, crate::compare::DiffAction::Drop);
+        assert!(items[0].dangerous);
+        assert_eq!(
+            items[0].sql.as_deref(),
+            Some("ALTER TABLE `db`.`orders` DROP FOREIGN KEY `fk_uid`")
+        );
+    }
+
+    #[test]
+    fn fk_untouched_tables_are_ignored() {
+        // FK 所在表不在模型集合、也不引用 tombstone → 完全不动（别人表的外键）
+        let empty: HashSet<String> = HashSet::new();
+        let items = diff_foreign_keys(
+            "db",
+            &empty,
+            &[],
+            &[fkd("fk_x", "other_tbl", &["uid"], "users", &["id"])],
+            &HashSet::new(),
+        );
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn fk_referencing_tombstone_dropped_regardless_of_owner() {
+        // 非模型表上的 FK 引用了 tombstone 表 → 也必须 DROP（否则删表必失败）
+        let empty: HashSet<String> = HashSet::new();
+        let tombs: HashSet<String> = ["old_ref"].iter().map(|s| s.to_string()).collect();
+        let items = diff_foreign_keys(
+            "db",
+            &empty,
+            &[],
+            &[fkd("fk_o", "other_tbl", &["x"], "Old_Ref", &["id"])],
+            &tombs,
+        );
+        assert_eq!(fk_ids(&items), vec!["fk:other_tbl:fk_o"]);
+        assert_eq!(items[0].action, crate::compare::DiffAction::Drop);
+        assert!(items[0].dangerous);
+    }
+
+    #[test]
+    fn fk_definition_change_rebuilds_in_one_alter() {
+        let model_tables: HashSet<String> = ["orders"].iter().map(|s| s.to_string()).collect();
+        let mut m = fkd("fk_uid", "orders", &["uid"], "users", &["id"]);
+        m.on_delete = Some("CASCADE".into());
+        let d = fkd("fk_uid", "orders", &["uid"], "users", &["id"]);
+        let items = diff_foreign_keys("db", &model_tables, &[m], &[d], &HashSet::new());
+        assert_eq!(fk_ids(&items), vec!["fk:orders:fk_uid"]);
+        assert_eq!(items[0].action, crate::compare::DiffAction::Modify);
+        let sql = items[0].sql.as_deref().unwrap();
+        assert!(sql.contains("DROP FOREIGN KEY `fk_uid`"), "{sql}");
+        assert!(sql.contains("ADD CONSTRAINT `fk_uid` FOREIGN KEY (`uid`) REFERENCES `db`.`users` (`id`) ON DELETE CASCADE"), "{sql}");
+        // 一条 ALTER
+        assert!(sql.starts_with("ALTER TABLE `db`.`orders`"), "{sql}");
+    }
+
+    #[test]
+    fn identical_fk_no_diff() {
+        let model_tables: HashSet<String> = ["orders"].iter().map(|s| s.to_string()).collect();
+        let fk = fkd("fk_uid", "orders", &["uid"], "users", &["id"]);
+        let items = diff_foreign_keys("db", &model_tables, &[fk.clone()], &[fk], &HashSet::new());
+        assert!(items.is_empty());
+    }
 
     fn live(db: &str, names: &[&str]) -> SchemaSnapshot {
         SchemaSnapshot {
