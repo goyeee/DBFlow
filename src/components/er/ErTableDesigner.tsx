@@ -20,7 +20,7 @@ import {
 import { api } from '../../api/commands'
 import { useErStore } from '../../stores/er'
 import { useErTab, useErTabKey } from './erTabContext'
-import { snapshotTableToSchema } from './modelSchema'
+import { colDraftToSchema, schemaToColDraft, snapshotTableToSchema } from './modelSchema'
 import { SqlView } from '../compare/SqlView'
 import type { ErColumnSchema, ErFkSchema, ErIndexSchema, ErTableSchema } from '../../api/types'
 
@@ -33,7 +33,8 @@ interface ColDraft {
   name: string
   dataType: string
   nullable: boolean
-  default: string
+  /** 三态：null=无默认，''=DEFAULT ''，其余为字面值（库侧语义区分二者） */
+  default: string | null
   autoInc: boolean
   comment: string
   extraRest: string // 除 auto_increment 外的 extra 原样保留（如 on update current_timestamp）
@@ -70,32 +71,10 @@ const TYPE_SUGGESTIONS = [
 ]
 
 function colToDraft(c: ErColumnSchema): ColDraft {
-  const hasAi = c.extra.toLowerCase().includes('auto_increment')
-  return {
-    uid: nextUid(),
-    name: c.name,
-    dataType: c.dataType,
-    nullable: c.nullable,
-    default: c.default ?? '',
-    autoInc: hasAi,
-    comment: c.comment ?? '',
-    extraRest: c.extra.split(/\s+/).filter((t) => t.toLowerCase() !== 'auto_increment').join(' '),
-    characterSet: c.characterSet,
-    collation: c.collation,
-  }
+  return { uid: nextUid(), ...schemaToColDraft(c) }
 }
 function draftToCol(c: ColDraft): ErColumnSchema {
-  const extra = [c.extraRest.trim(), c.autoInc ? 'auto_increment' : ''].filter(Boolean).join(' ')
-  return {
-    name: c.name.trim(),
-    dataType: c.dataType.trim(),
-    nullable: c.nullable,
-    default: c.default === '' ? null : c.default,
-    extra,
-    comment: c.comment === '' ? null : c.comment,
-    characterSet: c.characterSet,
-    collation: c.collation,
-  }
+  return colDraftToSchema(c)
 }
 function idxToDraft(i: ErIndexSchema): IdxDraft {
   return {
@@ -307,11 +286,22 @@ export function ErTableDesigner() {
       >
         NULL
       </Checkbox>
+      <Checkbox
+        checked={c.default === null}
+        onChange={(e) =>
+          setCols((cs) =>
+            cs.map((x) => (x.uid === c.uid ? { ...x, default: e.target.checked ? null : '' } : x)),
+          )
+        }
+      >
+        无默认
+      </Checkbox>
       <Input
         size="small"
-        style={{ width: 110 }}
+        style={{ width: 96 }}
         placeholder="默认值"
-        value={c.default}
+        disabled={c.default === null}
+        value={c.default ?? ''}
         onChange={(e) => setCols((cs) => cs.map((x) => (x.uid === c.uid ? { ...x, default: e.target.value } : x)))}
       />
       <Checkbox
@@ -527,7 +517,7 @@ export function ErTableDesigner() {
                         name: '',
                         dataType: '',
                         nullable: true,
-                        default: '',
+                        default: null,
                         autoInc: false,
                         comment: '',
                         extraRest: '',

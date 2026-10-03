@@ -35,6 +35,7 @@ import { erCanvasApi } from './erCanvasApi'
 import { askChoice } from './closeGuard'
 import { useErTab, useErTabKey } from './erTabContext'
 import { ErFkModal } from './ErFkModal'
+import { normalizeFkDirection } from './modelSchema'
 import type { ErEdgeInfo } from './transform'
 
 const nodeTypes = { erTable: TableNode }
@@ -745,13 +746,16 @@ export function ErCanvas() {
     const g = tab?.graph
     if (!g) return
     if (tab?.editMode) {
-      // 编辑态：拖拽源 = 子表列，目标 = 被引用表列
-      setFkPending({
-        sourceTable: g.tables[conn.source]?.name ?? conn.source,
-        sourceColumn: conn.sourceHandle,
-        targetTable: g.tables[conn.target]?.name ?? conn.target,
-        targetColumn: conn.targetHandle,
-      })
+      // 编辑态：方向按主键端规范化（从父表主键拖出时交换，与手动关联同规则），
+      // 拖拽源 = 子表列，目标 = 被引用表列
+      setFkPending(
+        normalizeFkDirection(g, {
+          sourceTable: g.tables[conn.source]?.name ?? conn.source,
+          sourceColumn: conn.sourceHandle,
+          targetTable: g.tables[conn.target]?.name ?? conn.target,
+          targetColumn: conn.targetHandle,
+        }),
+      )
       return
     }
     // 节点 id 是小写表名，展示用真实表名

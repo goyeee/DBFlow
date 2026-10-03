@@ -11,7 +11,9 @@ use crate::compare::sqlgen::{
     add_foreign_key_clause, drop_foreign_key_ddl, foreign_key_ddl, qualified, quote_ident,
 };
 use crate::compare::{diff_snapshots, CompareOptions, DiffAction, DiffItem, DiffKind};
-use crate::datasource::SchemaSnapshot;
+use crate::datasource::{
+    normalize_data_type, normalize_default, normalize_extra, SchemaSnapshot,
+};
 use crate::error::{AppError, AppResult};
 
 /// 模型快照组装结果：结构快照（source 用）+ 涉及表/tombstone 集合（小写）+ 模型外键
@@ -50,6 +52,14 @@ pub fn build_model_snapshot(
             continue;
         };
         let mut td = s.table.clone();
+        // 列字段与库侧同源归一化（用户在设计器自由输入 INT(11)/CURRENT_TIMESTAMP 等）：
+        // 库侧快照经 mysql.rs 归一化，模型侧不归一化则复跑 diff 永远有假 MODIFY
+        for c in &mut td.columns {
+            // I_S 的 COLUMN_TYPE 恒为小写：模型侧先小写再与库侧同规则去整数显示宽度
+            c.data_type = normalize_data_type(&c.data_type.to_ascii_lowercase());
+            c.default = normalize_default(c.default.take());
+            c.extra = normalize_extra(Some(c.extra.clone()));
+        }
         if let Some(lt) = live_by_lower.get(&lower) {
             td.name = lt.name.clone();
             if td.engine.is_none() {
@@ -226,13 +236,22 @@ fn fk_rule_eq(a: Option<&str>, b: Option<&str>) -> bool {
     a.map(|v| v.to_ascii_uppercase()) == b.map(|v| v.to_ascii_uppercase())
 }
 
-/// FK 语义等价（列映射/引用/规则；规则按默认等价归一化）
+/// FK 语义等价（列映射/引用/规则；规则按默认等价归一化，
+/// 列名/引用表名忽略大小写——用户重打列名不应触发假重建）
 fn fk_def_eq(a: &ForeignKeyDef, b: &ForeignKeyDef) -> bool {
     a.name == b.name
-        && a.table == b.table
-        && a.columns == b.columns
-        && a.ref_table == b.ref_table
-        && a.ref_columns == b.ref_columns
+        && a.table.eq_ignore_ascii_case(&b.table)
+        && a.columns.len() == b.columns.len()
+        && a.columns
+            .iter()
+            .zip(&b.columns)
+            .all(|(x, y)| x.eq_ignore_ascii_case(y))
+        && a.ref_table.eq_ignore_ascii_case(&b.ref_table)
+        && a.ref_columns.len() == b.ref_columns.len()
+        && a.ref_columns
+            .iter()
+            .zip(&b.ref_columns)
+            .all(|(x, y)| x.eq_ignore_ascii_case(y))
         && fk_rule_eq(a.on_delete.as_deref(), b.on_delete.as_deref())
         && fk_rule_eq(a.on_update.as_deref(), b.on_update.as_deref())
 }
@@ -847,6 +866,54 @@ mod tests {
         assert_eq!(kinds, vec!["fk", "fk", "tbl", "tbl"], "{items:?}");
         assert!(items.iter().take(2).all(|i| i.action == DiffAction::Drop));
         assert!(items.iter().skip(2).all(|i| i.action == crate::compare::DiffAction::Drop && i.kind == crate::compare::DiffKind::Table));
+    }
+
+    #[test]
+    fn model_column_fields_normalized_like_live() {
+        // 设计器自由输入的类型/默认值与库侧同源归一化：INT(11)→int、
+        // CURRENT_TIMESTAMP→current_timestamp —— 否则 CREATE 后复跑 diff 出
+        // 假 MODIFY（非危险、默认勾选），角标永远消不掉
+        let mut lt = tbl("t", &[("id", "int")]);
+        lt.engine = Some("InnoDB".into());
+        let lc = crate::datasource::ColumnDef {
+            name: "created".into(),
+            data_type: "timestamp".into(),
+            nullable: false,
+            default: Some("current_timestamp".into()),
+            extra: "on update current_timestamp".into(),
+            ..Default::default()
+        };
+        lt.columns.push(lc);
+        let l = SchemaSnapshot { database: "db".into(), tables: vec![lt], views: vec![], server_version: None };
+        // 模型用大写类型/默认值/EXTRA（用户手敲形态）
+        let mut model = input("t", &[("id", "INT(11)"), ("created", "TIMESTAMP")], &[]);
+        let s = model.schema.as_mut().unwrap();
+        s.table.columns[1].default = Some("CURRENT_TIMESTAMP".into());
+        s.table.columns[1].extra = "ON UPDATE CURRENT_TIMESTAMP".into();
+        let m = build_model_snapshot("db", &[model], &l);
+        let created = m.snapshot.tables[0].columns.iter().find(|c| c.name == "created").unwrap();
+        assert_eq!(created.data_type, "timestamp");
+        assert_eq!(created.default.as_deref(), Some("current_timestamp"));
+        assert_eq!(created.extra, "on update current_timestamp");
+        let items = crate::compare::diff_snapshots(
+            &m.snapshot,
+            &SchemaSnapshot { database: "db".into(), tables: l.tables.clone(), views: vec![], server_version: None },
+            &crate::compare::CompareOptions::default(),
+        );
+        assert!(
+            items.iter().all(|i| i.action == crate::compare::DiffAction::Noop),
+            "归一化后不应有差异: {items:?}"
+        );
+    }
+
+    #[test]
+    fn fk_def_eq_ignores_case_of_columns_and_ref_table() {
+        // 用户重打大小写不同的 FK 列名/引用表 → 不应触发假重建
+        let model_tables: HashSet<String> = ["orders"].iter().map(|s| s.to_string()).collect();
+        let m = fkd("fk_uid", "orders", &["UID"], "USERS", &["ID"]);
+        let d = fkd("fk_uid", "orders", &["uid"], "users", &["id"]);
+        let items = diff_foreign_keys("db", &model_tables, &[m], &[d], &HashSet::new());
+        assert!(items.is_empty(), "{items:?}");
     }
 
     #[test]

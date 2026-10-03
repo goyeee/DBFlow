@@ -162,3 +162,49 @@ describe('buildErDiffPayload', () => {
     expect(payload).toEqual([{ name: 'edited_then_del', schema: null }])
   })
 })
+
+// ───────────────── 评审修复：设计器列草稿三态默认值 / FK 拖线方向 ─────────────────
+
+import { colDraftToSchema, normalizeFkDirection, schemaToColDraft } from './modelSchema'
+import type { ErGraph } from './transform'
+
+  describe("设计器列草稿：默认值三态（无默认 ≠ DEFAULT '')", () => {
+  const base = { name: 'name', dataType: 'varchar(20)', nullable: false, default: null, extra: '', autoInc: false, comment: '', extraRest: '', characterSet: null, collation: null }
+  it("DEFAULT '' 经草稿往返无损（不再被静默剥离成无默认）", () => {
+    const draft = schemaToColDraft({ ...base, default: '' })
+    expect(draft.default).toBe('')
+    expect(colDraftToSchema(draft).default).toBe('')
+  })
+  it('无默认（null）经草稿往返保持 null', () => {
+    const draft = schemaToColDraft({ ...base, default: null })
+    expect(draft.default).toBeNull()
+    expect(colDraftToSchema(draft).default).toBeNull()
+  })
+})
+
+describe('normalizeFkDirection：主键端作为被引用方（与手动关联同规则）', () => {
+  const graph: ErGraph = {
+    tables: {
+      users: { name: 'users', comment: null, columns: [], indexes: [], singlePrimaryKey: 'id' },
+      orders: { name: 'orders', comment: null, columns: [], indexes: [], singlePrimaryKey: null },
+    },
+    fkEdges: [],
+    mfkEdges: [],
+  }
+  it('从父表主键拖向子表列 → 方向交换（子表作为 FK 所在表）', () => {
+    const r = normalizeFkDirection(graph, {
+      sourceTable: 'users', sourceColumn: 'id',
+      targetTable: 'orders', targetColumn: 'user_id',
+    })
+    expect(r).toEqual({
+      sourceTable: 'orders', sourceColumn: 'user_id',
+      targetTable: 'users', targetColumn: 'id',
+    })
+  })
+  it('正常方向（子表 → 父表主键）不动；两端都非主键也不动', () => {
+    const normal = { sourceTable: 'orders', sourceColumn: 'user_id', targetTable: 'users', targetColumn: 'id' }
+    expect(normalizeFkDirection(graph, normal)).toEqual(normal)
+    const none = { sourceTable: 'orders', sourceColumn: 'a', targetTable: 'users', targetColumn: 'b' }
+    expect(normalizeFkDirection(graph, none)).toEqual(none)
+  })
+})

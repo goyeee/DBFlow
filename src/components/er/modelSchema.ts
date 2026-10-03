@@ -1,11 +1,12 @@
 import type {
+  ErColumnSchema,
   ErFkSchema,
   ErModelTableInput,
   ErTableDef,
   ErTableSchema,
   ForeignKeyDef,
 } from '../../api/types'
-import type { ErTable } from './transform'
+import type { ErGraph, ErTable } from './transform'
 
 /** 图上建模的表状态：schema 存在即「模型为准」；deleted=true 为待删除 tombstone */
 export interface ModelTableState {
@@ -241,4 +242,78 @@ export function makeModelFk(input: ModelFkInput): ErFkSchema {
     onDelete: input.onDelete ?? null,
     onUpdate: input.onUpdate ?? null,
   }
+}
+
+// ───────────────── 设计器列草稿（默认值三态） ─────────────────
+
+/** 设计器列草稿的数据形态（不含 UI 的 uid）。
+ *  default 三态：null=无默认，''=DEFAULT ''，其余为字面值——
+ *  库侧 normalize_default 刻意区分空串默认与无默认，设计器不得合并二者 */
+export interface ColDraftData {
+  name: string
+  dataType: string
+  nullable: boolean
+  default: string | null
+  autoInc: boolean
+  comment: string
+  /** 除 auto_increment 外的 extra 原样保留（如 on update current_timestamp） */
+  extraRest: string
+  characterSet: string | null
+  collation: string | null
+}
+
+/** 草稿 → 列 schema（autoInc 与 extraRest 合成 extra） */
+export function colDraftToSchema(c: ColDraftData): ErColumnSchema {
+  const extra = [c.extraRest.trim(), c.autoInc ? 'auto_increment' : ''].filter(Boolean).join(' ')
+  return {
+    name: c.name.trim(),
+    dataType: c.dataType.trim(),
+    nullable: c.nullable,
+    default: c.default === '' ? '' : c.default,
+    extra,
+    comment: c.comment === '' ? null : c.comment,
+    characterSet: c.characterSet,
+    collation: c.collation,
+  }
+}
+
+/** 列 schema → 草稿（extra 拆出 auto_increment；default 三态保持） */
+export function schemaToColDraft(c: ErColumnSchema): ColDraftData {
+  const hasAi = (c.extra ?? '').toLowerCase().includes('auto_increment')
+  return {
+    name: c.name,
+    dataType: c.dataType,
+    nullable: c.nullable,
+    default: c.default,
+    autoInc: hasAi,
+    comment: c.comment ?? '',
+    extraRest: (c.extra ?? '').split(/\s+/).filter((t) => t.toLowerCase() !== 'auto_increment').join(' '),
+    characterSet: c.characterSet,
+    collation: c.collation,
+  }
+}
+
+// ───────────────── FK 拖线方向规范化 ─────────────────
+
+/** 拖线方向规范化：源端是本表主键且目标端不是 → 交换（主键端作为被引用方），
+ *  与手动关联 makeManualEdge 同规则——反向拖线不得生成倒置外键落库 */
+export function normalizeFkDirection<
+  T extends { sourceTable: string; sourceColumn: string; targetTable: string; targetColumn: string },
+>(graph: ErGraph, pending: T): T {
+  const src = graph.tables[pending.sourceTable.toLowerCase()]
+  const tgt = graph.tables[pending.targetTable.toLowerCase()]
+  const srcIsPk =
+    !!src && src.singlePrimaryKey?.toLowerCase() === pending.sourceColumn.toLowerCase()
+  const tgtIsPk =
+    !!tgt && tgt.singlePrimaryKey?.toLowerCase() === pending.targetColumn.toLowerCase()
+  if (srcIsPk && !tgtIsPk) {
+    return {
+      ...pending,
+      sourceTable: pending.targetTable,
+      sourceColumn: pending.targetColumn,
+      targetTable: pending.sourceTable,
+      targetColumn: pending.sourceColumn,
+    }
+  }
+  return pending
 }

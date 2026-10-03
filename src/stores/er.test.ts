@@ -730,3 +730,23 @@ describe('ER store：应用闭环', () => {
     expect(t.edgeRoutes['fk:user_roles:fk_user_roles_usersid']).toBeUndefined()
   })
 })
+
+describe('评审修复：tombstone 表上建/删模型外键不复活删除标记', () => {
+  it('addModelFk/removeModelFk 保持 deleted: true', async () => {
+    mockApi(snapWith(true), null)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    const store = useErStore.getState()
+    store.addModelFk(KEY_A, { table: 'user_roles', columns: ['usersID'], refTable: 'users', refColumns: ['usersID'] })
+    useErStore.getState().deleteTable(KEY_A, 'user_roles')
+    // tombstone（保留编辑）上再建一条 FK → 仍应是 deleted
+    const r = useErStore.getState().addModelFk(KEY_A, { table: 'user_roles', columns: ['user_rolesID'], refTable: 'users', refColumns: ['usersID'] })
+    expect(r.ok).toBe(true)
+    let t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.user_roles?.deleted).toBe(true)
+    // 删除该 FK → 仍 deleted
+    useErStore.getState().removeModelFk(KEY_A, 'user_roles', 'fk_user_roles_usersid')
+    t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.user_roles?.deleted).toBe(true)
+    expect(t.modelTables.user_roles).toBeDefined() // tombstone 不因 sameAsDb 被清除
+  })
+})

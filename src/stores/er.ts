@@ -579,8 +579,12 @@ export const useErStore = create<ErStore>((set, get) => {
       )
       const err = validateTableSchema(schema, others)
       if (err) return { ok: false, error: err }
+      // tombstone 表上建 FK 不复活删除标记（恢复必须走 restoreTable）
       patchTab(tabKey, {
-        modelTables: { ...t.modelTables, [childLower]: { schema, deleted: false } },
+        modelTables: {
+          ...t.modelTables,
+          [childLower]: { schema, deleted: !!t.modelTables[childLower]?.deleted },
+        },
         dirty: true,
       })
       rebuildGraph(tabKey)
@@ -603,8 +607,10 @@ export const useErStore = create<ErStore>((set, get) => {
         ? t.snapshot.foreignKeys.filter((f) => f.table.toLowerCase() === tableLower)
         : []
       const sameAsDb = !!src && schemasEqual(schema, snapshotTableToSchema(src, srcFks))
-      if (sameAsDb) delete modelTables[tableLower]
-      else modelTables[tableLower] = { schema, deleted: false }
+      const wasDeleted = !!t.modelTables[tableLower]?.deleted
+      // tombstone 不因 sameAsDb 被清除；删除标记保持
+      if (sameAsDb && !wasDeleted) delete modelTables[tableLower]
+      else modelTables[tableLower] = { schema, deleted: wasDeleted }
       patchTab(tabKey, { modelTables, dirty: true })
       rebuildGraph(tabKey)
     },
