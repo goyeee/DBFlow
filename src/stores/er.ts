@@ -239,9 +239,17 @@ export const useErStore = create<ErStore>((set, get) => {
           docIssue = errText(e)
         }
 
-        const graph = buildErGraph(snapshot)
+        // 版本号校验：只认 1/2；其他版本不按无文档静默处理，要显式提示
+        let overlayInput = doc
+        if (doc && doc.formatVersion !== 1 && doc.formatVersion !== 2) {
+          docIssue = `文档版本 ${doc.formatVersion} 不受支持`
+          overlayInput = null
+        }
+        const overlay = docOverlay(overlayInput)
+        // 有 schema 的表以文档结构渲染（模型为准）；tombstone 标记
+        const modelTables = overlay.modelTables
+        const graph = buildErGraph(snapshot, modelTables)
         const inferredEdges = inferEdges(graph)
-        const overlay = docOverlay(doc)
         const lower = Object.keys(graph.tables)
 
         // 恢复手动关联；结构变更后表/列已不存在的丢弃
@@ -293,6 +301,7 @@ export const useErStore = create<ErStore>((set, get) => {
         // 连线路径：只保留当前仍存在的连线（fk/推断/手动）上的路径
         const allEdgeIds = new Set([
           ...graph.fkEdges.map((e) => e.id),
+          ...graph.mfkEdges.map((e) => e.id),
           ...inferredEdges.map((e) => e.id),
           ...manualEdges.map((e) => e.id),
         ])
@@ -309,6 +318,7 @@ export const useErStore = create<ErStore>((set, get) => {
           graph,
           inferredEdges,
           manualEdges,
+          modelTables,
           positions: cleanPositions,
           collapsed,
           inferredStatus,

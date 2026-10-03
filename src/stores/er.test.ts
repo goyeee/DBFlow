@@ -591,3 +591,56 @@ describe('ER store：图上建模', () => {
     expect(t.modelTables.orders).toBeUndefined()
   })
 })
+
+describe('ER store：v2 文档恢复与保存', () => {
+  const v2Schema = {
+    name: 'user_roles', engine: null, collation: null, comment: null,
+    columns: [
+      { name: 'user_rolesID', dataType: 'bigint', nullable: false, default: null, extra: '', comment: null, characterSet: null, collation: null },
+    ],
+    indexes: [{ name: 'PRIMARY', columns: ['user_rolesID'], subParts: [null], directions: [null], unique: true, isPrimary: true, indexType: 'BTREE' }],
+    foreignKeys: [{ name: 'fk_x', table: 'user_roles', columns: ['user_rolesID'], refTable: 'users', refColumns: ['usersID'], onDelete: null, onUpdate: null }],
+  }
+  const v2Doc: ErModelDoc = {
+    formatVersion: 2,
+    kind: 'mysql',
+    database: 'db1',
+    origin: { connectionName: '本地', capturedAt: '2026-01-01T00:00:00Z' },
+    tables: [
+      { id: 'users', name: 'users', x: 100, y: 200, collapsed: false },
+      { id: 'user_roles', name: 'user_roles', x: 300, y: 200, collapsed: false, schema: v2Schema },
+      { id: 'legacy', name: 'legacy', x: 500, y: 200, collapsed: false, status: 'deleted' },
+    ],
+    edges: [],
+  }
+
+  it('v2 文档：schema 表标 edited、tombstone 标 deleted、mfk 边恢复', async () => {
+    mockApi(snapWith(true), v2Doc)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    const t = useErStore.getState().tabs[KEY_A]!
+    expect(t.graph!.tables.user_roles.modelStatus).toBe('edited')
+    // legacy 是 tombstone 且快照（库）里没有该表 → 不进图；条目保留在 modelTables（应用时产出 DROP）
+    expect(t.graph!.tables.legacy).toBeUndefined()
+    expect(t.graph!.mfkEdges.map((e) => e.id)).toEqual(['mfk:user_roles:fk_x'])
+    expect(t.modelTables.legacy).toEqual({ schema: null, deleted: true })
+    expect(t.docIssue).toBeNull()
+  })
+
+  it('不受支持的版本号 → docIssue 提示、按无文档处理', async () => {
+    mockApi(snapWith(true), { ...v2Doc, formatVersion: 99 as 1 | 2 })
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    const t = useErStore.getState().tabs[KEY_A]!
+    expect(t.docIssue).toContain('99')
+    expect(t.modelTables).toEqual({})
+  })
+
+  it('v1 文档照常加载（惰性迁移），保存后升为 v2', async () => {
+    mockApi(snapWith(true), savedDoc)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    await useErStore.getState().save(KEY_A)
+    const calls = (api.saveErModel as ReturnType<typeof vi.fn>).mock.calls
+    const doc = calls[calls.length - 1]![2] as ErModelDoc
+    expect(doc.formatVersion).toBe(2)
+    expect(doc.tables.every((t) => t.schema === undefined && t.status === undefined)).toBe(true)
+  })
+})
