@@ -3,6 +3,7 @@ import { Button, Dropdown, Empty, Layout, Space, Tabs, Tooltip, message } from '
 import {
   FolderAddOutlined,
   ImportOutlined,
+  MenuFoldOutlined,
   PlusOutlined,
   ReloadOutlined,
 } from '@ant-design/icons'
@@ -12,6 +13,11 @@ import { useUiStore } from '../../stores/ui'
 import { ConnectionTree } from '../connection/ConnectionTree'
 import { COLOR_PRESETS } from '../connection/colors'
 import { TableColumnsView } from '../table/TableColumnsView'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import { ErView } from '../er/ErView'
+import { ErrorBoundary } from '../ErrorBoundary'
+import { guardCloseTabs, guardDirtyTabs } from '../er/closeGuard'
+import { useErStore } from '../../stores/er'
 import { SyncSchemaModal } from '../compare/SyncSchemaModal'
 import { DataSyncModal } from '../datacmp/DataSyncModal'
 import { TitleBar } from './TitleBar'
@@ -30,6 +36,8 @@ export function AppShell() {
   const closeTabsToRight = useSessionStore((s) => s.closeTabsToRight)
   const openTable = useSessionStore((s) => s.openTable)
   const revealInTree = useUiStore((s) => s.revealInTree)
+  const siderCollapsed = useUiStore((s) => s.siderCollapsed)
+  const toggleSider = useUiStore((s) => s.toggleSider)
   const connections = useConnectionsStore((s) => s.connections)
 
   const handleRefresh = () => {
@@ -39,6 +47,21 @@ export function AppShell() {
       .refreshConnected()
       .catch((e) => message.error(errText(e)))
   }
+
+  // 拦截窗口红色关闭按钮：有未保存布局时先守卫，通过后 destroy 放行。
+  // 注册监听后 Rust 在事件分发时已自动阻止关闭，无需手动 preventDefault；
+  // 放行必须用 destroy()——close() 会再次触发 close-requested 造成重入
+  useEffect(() => {
+    const win = getCurrentWindow()
+    const unlistenP = win.onCloseRequested(async () => {
+      const proceed = await guardDirtyTabs(useErStore.getState().dirtyKeys())
+      if (proceed) win.destroy()
+      // 用户取消：不 destroy，窗口保持存活
+    })
+    return () => {
+      unlistenP.then((u) => u())
+    }
+  }, [])
 
   // 标签悬停全称弹层：0.5s 后显示在鼠标右下方（浅色自定义弹层，不用黑底 Tooltip）
   const [tabTip, setTabTip] = useState<{ x: number; y: number; title: string } | null>(null)
@@ -123,6 +146,24 @@ export function AppShell() {
   const closeOtherTabsAnim = (key: string) => withTabAnimation(() => closeOtherTabs(key))
   const closeTabsToRightAnim = (key: string) => withTabAnimation(() => closeTabsToRight(key))
 
+  /** 关闭单个标签（标签 X / 右键「关闭」）：经统一守卫处理未保存布局 */
+  const closeTabGuard = (key: string) => {
+    guardCloseTabs([key], () => closeTabAnim(key))
+  }
+
+  /** 右键「关闭右侧」：守卫覆盖右侧所有标签，取消则整组都不关 */
+  const closeRightGuard = (key: string) => {
+    const idx = tabs.findIndex((t) => t.key === key)
+    const keys = tabs.slice(idx + 1).map((t) => t.key)
+    guardCloseTabs(keys, () => closeTabsToRightAnim(key))
+  }
+
+  /** 右键「关闭其他」：守卫覆盖除当前外所有标签 */
+  const closeOthersGuard = (key: string) => {
+    const keys = tabs.filter((t) => t.key !== key).map((t) => t.key)
+    guardCloseTabs(keys, () => closeOtherTabsAnim(key))
+  }
+
   useEffect(() => {
     load().catch((e) => message.error(errText(e)))
   }, [load])
@@ -132,7 +173,14 @@ export function AppShell() {
       <TitleBar />
 
       <Layout className="app-body">
-        <Layout.Sider width={280} theme="light" className="sider">
+        <Layout.Sider
+          width={280}
+          collapsedWidth={0}
+          collapsed={siderCollapsed}
+          trigger={null}
+          theme="light"
+          className="sider"
+        >
           <div className="sider-header">
             <span className="sider-header-title">连接</span>
             <Space size={2}>
@@ -168,6 +216,14 @@ export function AppShell() {
                   onClick={handleRefresh}
                 />
               </Tooltip>
+              <Tooltip title="隐藏侧边栏" placement="bottom">
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<MenuFoldOutlined />}
+                  onClick={toggleSider}
+                />
+              </Tooltip>
             </Space>
           </div>
           <div className="sider-body">
@@ -193,19 +249,25 @@ export function AppShell() {
             <Tabs
               type="editable-card"
               hideAdd
+              /* 关闭再重开同 key 标签时 rc-tabs 可能残留旧面板（旧 ER 画布不销毁、
+                 fitView 在隐藏容器里静默失败），非激活面板一律销毁保证状态干净 */
+              destroyOnHidden
               activeKey={effectiveActiveKey ?? undefined}
               onChange={(k) => {
                 // Antd Tabs 在标签增删时可能触发 onChange 传入空字符串，需校验
                 if (tabs.some((t) => t.key === k)) setActiveTab(k)
               }}
               onEdit={(k, action) => {
-                if (action === 'remove') closeTabAnim(String(k))
+                if (action === 'remove') closeTabGuard(String(k))
               }}
               items={tabs.map((t, i) => {
                 const color = tabColor(t.connectionId)
                 const connName = connections.find((c) => c.id === t.connectionId)?.name
-                // 表名@数据库名(连接名)
-                const title = `${t.table}@${t.database}${connName ? `(${connName})` : ''}`
+                // 表名@数据库名(连接名) / ER图@数据库名(连接名)
+                const title =
+                  t.type === 'table'
+                    ? `${t.table}@${t.database}${connName ? `(${connName})` : ''}`
+                    : `ER图@${t.database}${connName ? `(${connName})` : ''}`
                 return {
                   key: t.key,
                   label: (
@@ -224,28 +286,29 @@ export function AppShell() {
                             label: '关闭其他',
                             disabled: tabs.length <= 1,
                           },
-                          { type: 'divider' },
-                          { key: 'reveal', label: '导航栏打开' },
+                          ...(t.type === 'table'
+                            ? ([{ type: 'divider' as const }, { key: 'reveal', label: '导航栏打开' }])
+                            : []),
                         ],
                         onClick: ({ key: action }) => {
-                          if (action === 'close') closeTabAnim(t.key)
-                          else if (action === 'close-right') closeTabsToRightAnim(t.key)
-                          else if (action === 'close-others') closeOtherTabsAnim(t.key)
-                          else if (action === 'reveal')
+                          if (action === 'close') closeTabGuard(t.key)
+                          else if (action === 'close-right') closeRightGuard(t.key)
+                          else if (action === 'close-others') closeOthersGuard(t.key)
+                          else if (action === 'reveal' && t.type === 'table')
                             revealInTree(t.connectionId, t.database, t.table)
                         },
                       }}
                     >
                       <span
                         className="table-tab-label"
-                        onDoubleClick={() =>
-                          openTable(t.connectionId, t.database, t.table)
-                        }
+                        onDoubleClick={() => {
+                          if (t.type === 'table') openTable(t.connectionId, t.database, t.table)
+                        }}
                         onMouseEnter={(e) => showTipLater(e, title)}
                         onMouseLeave={hideTip}
                         onContextMenu={hideTip}
                         style={{
-                          fontStyle: t.preview ? 'italic' : undefined,
+                          fontStyle: t.type === 'table' && t.preview ? 'italic' : undefined,
                           borderBottom: color ? `3px solid ${color}` : undefined,
                         }}
                       >
@@ -253,7 +316,16 @@ export function AppShell() {
                       </span>
                     </Dropdown>
                   ),
-                  children: <TableColumnsView key={t.key} tab={t} />,
+                  children:
+                    t.type === 'table' ? (
+                      <ErrorBoundary scope="表结构" key={t.key}>
+                        <TableColumnsView tab={t} />
+                      </ErrorBoundary>
+                    ) : (
+                      <ErrorBoundary scope="ER 图" key={t.key}>
+                        <ErView tab={t} />
+                      </ErrorBoundary>
+                    ),
                 }
               })}
             />

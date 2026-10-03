@@ -1,7 +1,3 @@
-# AGENTS.md — AI 代理协作规则
-
-本文件指导 AI 代理在本仓库中工作。修改代码前请先阅读并遵守。
-
 ## 项目简介
 
 DBFlow 是一个数据库结构与数据同步工具（类 Navicat），基于 Tauri 2 的桌面应用。
@@ -9,6 +5,12 @@ DBFlow 是一个数据库结构与数据同步工具（类 Navicat），基于 T
 - **前端**：React 19 + TypeScript + Ant Design 6 + Vite + Zustand
 - **后端**：Rust（`src-tauri/`），Tauri 2 框架
 - **包管理**：pnpm
+
+## 注意事项
+
+有疑问时记得询问，不要私自做决定
+
+不要私自commit，被要求提交时写commit内容不要包含任何Ai工具名称，允许后才可push
 
 ## 常用命令
 
@@ -64,3 +66,4 @@ pnpm version <版本号>   # 例：pnpm version 0.2.3 或 0.2.3-beta.1
 - Rust 代码位于 `src-tauri/src/`，遵循 Rust 标准惯例。
 - 新增业务逻辑需配套测试（参考 `src/stores/*.test.ts` 的写法）。
 - 不要引入新的重型依赖，除非确有必要。
+

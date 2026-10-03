@@ -447,8 +447,43 @@ impl LiveConnection for MySqlLive {
         })
     }
 
-    async fn execute(&self, sql: &str) -> AppResult<()> {
-        // DDL 用文本协议（raw_sql）：MySQL 5.6 不支持 PREPARE CREATE/DROP DATABASE 等语句。
+    async fn list_foreign_keys(&self, database: &str) -> AppResult<Vec<super::ForeignKeyDef>> {
+        // KEY_COLUMN_USAGE 只含有引用的列（REFERENCED_TABLE_NAME 非空过滤掉主键/唯一键行）；
+        // ON DELETE/UPDATE 规则在 REFERENTIAL_CONSTRAINTS（约束级，一行一个约束）
+        let rows = sqlx::query(
+            r#"
+            SELECT kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME,
+                   kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME,
+                   kcu.ORDINAL_POSITION,
+                   rc.DELETE_RULE, rc.UPDATE_RULE
+            FROM information_schema.KEY_COLUMN_USAGE kcu
+            JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+              ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+             AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+             AND rc.TABLE_NAME = kcu.TABLE_NAME
+            WHERE kcu.TABLE_SCHEMA = ? AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
+            ORDER BY kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION
+            "#,
+        )
+        .bind(database)
+        .fetch_all(&self.pool)
+        .await?;
+        let fk_rows = rows
+            .into_iter()
+            .map(|row| FkRow {
+                table: row.try_get("TABLE_NAME").unwrap_or_default(),
+                constraint: row.try_get("CONSTRAINT_NAME").unwrap_or_default(),
+                column: row.try_get("COLUMN_NAME").unwrap_or_default(),
+                ref_table: row.try_get("REFERENCED_TABLE_NAME").unwrap_or_default(),
+                ref_column: row.try_get("REFERENCED_COLUMN_NAME").unwrap_or_default(),
+                on_delete: row.try_get::<Option<String>, _>("DELETE_RULE").ok().flatten(),
+                on_update: row.try_get::<Option<String>, _>("UPDATE_RULE").ok().flatten(),
+            })
+            .collect();
+        Ok(aggregate_foreign_keys(fk_rows))
+    }
+
+    async fn execute(&self, sql: &str) -> AppResult<()> {        // DDL 用文本协议（raw_sql）：MySQL 5.6 不支持 PREPARE CREATE/DROP DATABASE 等语句。
         // SQL 来自自家 sqlgen（标识符/字面量均已转义）或用户明确勾选的同步语句，非外部输入；
         // async_trait 的生命周期装箱要求先拥有化。
         let owned = sql.to_owned();
@@ -894,5 +929,91 @@ mod e2e_tests {
         for l in &lives {
             l.shutdown().await;
         }
+    }
+}
+
+// ───────────────────────── 外键采集（ER 图关系线） ─────────────────────────
+
+/// KEY_COLUMN_USAGE 的一行（已按 ORDINAL_POSITION 排序）
+#[derive(Debug, Clone)]
+pub(super) struct FkRow {
+    pub table: String,
+    pub constraint: String,
+    pub column: String,
+    pub ref_table: String,
+    pub ref_column: String,
+    pub on_delete: Option<String>,
+    pub on_update: Option<String>,
+}
+
+/// 行粒度 → 约束粒度聚合：同一 (table, constraint) 的多行合并为一个外键。
+/// 输入行必须已按 (TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION) 排序（查询保证）。
+pub(super) fn aggregate_foreign_keys(rows: Vec<FkRow>) -> Vec<super::ForeignKeyDef> {
+    use std::collections::BTreeMap;
+    let mut seen: BTreeMap<(String, String), super::ForeignKeyDef> = BTreeMap::new();
+    for r in rows {
+        let key = (r.table.clone(), r.constraint.clone());
+        let def = seen.entry(key).or_insert_with(|| super::ForeignKeyDef {
+            name: r.constraint.clone(),
+            table: r.table.clone(),
+            columns: Vec::new(),
+            ref_table: r.ref_table.clone(),
+            ref_columns: Vec::new(),
+            on_delete: r.on_delete.clone(),
+            on_update: r.on_update.clone(),
+        });
+        def.columns.push(r.column);
+        def.ref_columns.push(r.ref_column);
+    }
+    seen.into_values().collect()
+}
+
+#[cfg(test)]
+mod fk_tests {
+    use super::*;
+
+    fn row(table: &str, c: &str, col: &str, rt: &str, rc: &str, del: Option<&str>, upd: Option<&str>) -> FkRow {
+        FkRow {
+            table: table.into(),
+            constraint: c.into(),
+            column: col.into(),
+            ref_table: rt.into(),
+            ref_column: rc.into(),
+            on_delete: del.map(Into::into),
+            on_update: upd.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn composite_fk_merges_columns_in_order() {
+        let fks = aggregate_foreign_keys(vec![
+            row("order_items", "fk_order", "order_id", "orders", "id", Some("CASCADE"), Some("RESTRICT")),
+            row("order_items", "fk_order", "item_seq", "orders", "seq", Some("CASCADE"), Some("RESTRICT")),
+        ]);
+        assert_eq!(fks.len(), 1);
+        assert_eq!(fks[0].columns, vec!["order_id", "item_seq"]);
+        assert_eq!(fks[0].ref_columns, vec!["id", "seq"]);
+        assert_eq!(fks[0].on_delete.as_deref(), Some("CASCADE"));
+        assert_eq!(fks[0].on_update.as_deref(), Some("RESTRICT"));
+    }
+
+    #[test]
+    fn multiple_constraints_sorted_by_table_then_name() {
+        let fks = aggregate_foreign_keys(vec![
+            row("b", "fk_z", "x", "t", "id", None, None),
+            row("a", "fk_m", "y", "t", "id", None, None),
+            row("a", "fk_n", "z", "t", "id", None, None),
+        ]);
+        assert_eq!(
+            fks.iter().map(|f| (f.table.as_str(), f.name.as_str())).collect::<Vec<_>>(),
+            vec![("a", "fk_m"), ("a", "fk_n"), ("b", "fk_z")]
+        );
+        // 无规则的外键 on_delete/on_update 为 None
+        assert!(fks[0].on_delete.is_none() && fks[0].on_update.is_none());
+    }
+
+    #[test]
+    fn empty_input() {
+        assert!(aggregate_foreign_keys(vec![]).is_empty());
     }
 }

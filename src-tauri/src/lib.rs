@@ -26,10 +26,11 @@ pub fn run() {
             let config_dir = app.path().app_config_dir()?;
             std::fs::create_dir_all(&config_dir)?;
             secret::init_local_dir(config_dir.clone());
-            app.manage(config::store::ConnectionStore::new(config_dir));
+            app.manage(config::store::ConnectionStore::new(config_dir.clone()));
             app.manage(datasource::Registry::default());
             app.manage(tunnel::TunnelManager::default());
             app.manage(commands::datacmp::DataCompareCache::default());
+            app.manage(config::er_models::ErModelStore::new(config_dir.clone()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -55,6 +56,14 @@ pub fn run() {
             commands::explore::list_databases,
             commands::explore::list_tables,
             commands::explore::describe_table,
+            commands::er::get_er_snapshot,
+            commands::er::load_er_model,
+            commands::er::save_er_model,
+            commands::er::delete_er_model,
+            commands::er::export_er_model,
+            commands::er::export_er_sql,
+            commands::er::export_er_image,
+            commands::er::export_tables_ddl,
             commands::navicat::navicat_scan,
             commands::navicat::navicat_import_ncx,
             commands::navicat::navicat_import,

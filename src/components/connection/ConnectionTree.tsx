@@ -3,6 +3,7 @@ import { Dropdown, Empty, Modal, Spin, Tree, message } from 'antd'
 import type { DataNode } from 'antd/es/tree'
 import {
   ApiOutlined,
+  ApartmentOutlined,
   DatabaseOutlined,
   DisconnectOutlined,
   FolderOpenOutlined,
@@ -16,6 +17,7 @@ import { useConnectionsStore } from '../../stores/connections'
 import { useSessionStore } from '../../stores/session'
 import { useUiStore } from '../../stores/ui'
 import { COLOR_PRESETS } from './colors'
+import { guardCloseTabs, guardDisconnect } from '../er/closeGuard'
 
 /**
  * nodeKey 编码：
@@ -265,6 +267,7 @@ export function ConnectionTree() {
               const tableKey = `t:${c.id}:${encodeURIComponent(d.name)}:${encodeURIComponent(t.name)}`
               const tableOpen = session.tabs.some(
                 (tab) =>
+                  tab.type === 'table' &&
                   tab.connectionId === c.id &&
                   tab.database === d.name &&
                   tab.table === t.name,
@@ -406,7 +409,6 @@ function wrapContextMenu(
               domEvent.stopPropagation()
               const id = rest[0]
               const { connections: conns, removeLocal: rm } = useConnectionsStore.getState()
-              const session = useSessionStore.getState()
               const ui = useUiStore.getState()
               const conn = conns.find((c) => c.id === id)
               if (!conn) return
@@ -427,9 +429,15 @@ function wrapContextMenu(
                   okText: '删除',
                   okButtonProps: { danger: true },
                   onOk: async () => {
+                    // 先过未保存布局守卫（含断开），取消则不删除
+                    const proceed = await guardDisconnect(id, async () => {
+                      if (useSessionStore.getState().connected[id]) {
+                        await useSessionStore.getState().disconnect(id)
+                      }
+                    })
+                    if (!proceed) return
                     await api.deleteConnection(id)
                     rm(id)
-                    if (session.connected[id]) await session.disconnect(id)
                     message.success('已删除')
                   },
                 })
@@ -437,12 +445,14 @@ function wrapContextMenu(
                 const ok = await ctx.ensureConnected(id)
                 if (ok) ctx.setExpandedKeys((prev) => [...new Set([...prev, `c:${id}`])])
               } else if (action === 'disconnect') {
-                // 先折叠，再清状态；否则 rc-tree 看到 expandedKeys 还在、loadedKeys 被清空，
-                // 会立即触发 loadData 重新连接，导致“折叠了但图标还是绿色”。
-                ctx.setExpandedKeys((prev) =>
-                  prev.filter((k) => k !== `c:${id}` && !k.startsWith(`d:${id}:`)),
-                )
-                await session.disconnect(id)
+                await guardDisconnect(id, async () => {
+                  // 先折叠再断开；否则 rc-tree 看到 expandedKeys 还在、loadedKeys 已清空，
+                  // 会立即 loadData 重连，导致“折叠了但图标还是绿色”
+                  ctx.setExpandedKeys((prev) =>
+                    prev.filter((k) => k !== `c:${id}` && !k.startsWith(`d:${id}:`)),
+                  )
+                  await useSessionStore.getState().disconnect(id)
+                })
               }
             },
           }}
@@ -451,18 +461,34 @@ function wrapContextMenu(
         </Dropdown>
       )
     } else if (type === 'd') {
-      // 数据库节点右键"关闭"：收起该节点，并关掉该库下所有已打开的表标签
+      // 数据库节点右键：查看 ER 图 / 关闭（收起该节点，并关掉该库下所有已打开的标签）
       menu = (
         <Dropdown
           trigger={['contextMenu']}
           menu={{
-            items: [{ key: 'close', label: '关闭' }],
-            onClick: ({ key: action, domEvent }) => {
+            items: [
+              { key: 'er', label: '查看 ER 图', icon: <ApartmentOutlined /> },
+              { type: 'divider' },
+              { key: 'close', label: '关闭' },
+            ],
+            onClick: async ({ key: action, domEvent }) => {
               domEvent.stopPropagation()
-              if (action !== 'close') return
               const [id, db] = rest
-              useSessionStore.getState().closeDatabaseTabs(id, decodeURIComponent(db))
-              ctx.setExpandedKeys((prev) => prev.filter((k) => k !== key))
+              if (action === 'er') {
+                if (await ctx.ensureConnected(id)) {
+                  useSessionStore.getState().openErTab(id, decodeURIComponent(db))
+                }
+              } else if (action === 'close') {
+                const database = decodeURIComponent(db)
+                const closeKeys = useSessionStore
+                  .getState()
+                  .tabs.filter((t) => t.connectionId === id && t.database === database)
+                  .map((t) => t.key)
+                guardCloseTabs(closeKeys, () => {
+                  useSessionStore.getState().closeDatabaseTabs(id, database)
+                  ctx.setExpandedKeys((prev) => prev.filter((k) => k !== key))
+                })
+              }
             },
           }}
         >

@@ -28,6 +28,8 @@ pub trait LiveConnection: Send + Sync {
         database: &str,
         only_tables: Option<&[String]>,
     ) -> AppResult<SchemaSnapshot>;
+    /// 抓取一个库的外键列表（ER 图关系线用）
+    async fn list_foreign_keys(&self, database: &str) -> AppResult<Vec<ForeignKeyDef>>;
     /// 执行一条 DDL/SQL（同步部署用）
     async fn execute(&self, sql: &str) -> AppResult<()>;
     /// 按对比键 keyset 分页拉取一块行数据（数据对比用）。
@@ -154,7 +156,8 @@ pub struct SchemaSnapshot {
     pub server_version: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TableDef {
     pub name: String,
     pub engine: Option<String>,
@@ -165,7 +168,8 @@ pub struct TableDef {
     pub indexes: Vec<IndexDef>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ColumnDef {
     pub name: String,
     /// COLUMN_TYPE 全文，如 varchar(255)、int unsigned
@@ -183,7 +187,8 @@ pub struct ColumnDef {
     pub collation: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct IndexDef {
     pub name: String,
     /// 按 SEQ_IN_INDEX 排序的列名
@@ -203,6 +208,19 @@ pub struct IndexDef {
 pub struct ViewDef {
     pub name: String,
     pub definition: String,
+}
+
+/// 外键定义（ER 图关系线用）。复合外键的 columns / ref_columns 按序号一一对应。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignKeyDef {
+    pub name: String,
+    pub table: String,
+    pub columns: Vec<String>,
+    pub ref_table: String,
+    pub ref_columns: Vec<String>,
+    pub on_delete: Option<String>,
+    pub on_update: Option<String>,
 }
 
 /// COLUMN_DEFAULT 跨版本归一化：

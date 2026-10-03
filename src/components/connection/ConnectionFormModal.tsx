@@ -22,6 +22,7 @@ import { useUiStore } from '../../stores/ui'
 import { COLOR_OPTIONS } from './colors'
 import { SshTunnelFields } from './SshTunnelFields'
 import { errText } from './ConnectionTree'
+import { guardDisconnect } from '../er/closeGuard'
 
 export interface FormValues {
   name: string
@@ -224,6 +225,16 @@ export function ConnectionFormModal() {
       const values = await form.validateFields()
       const v: FormValues = values
       const input = valuesToInput(values, editing?.id ?? null)
+
+      // 编辑已连接连接：保存配置前先裁决该连接下未保存的 ER 布局；
+      // perform 内断开旧会话、关闭标签（守卫通过即清分片），取消则中止整个保存
+      if (editing) {
+        const proceed = await guardDisconnect(editing.id, async () => {
+          await useSessionStore.getState().disconnect(editing.id)
+        })
+        if (!proceed) return
+      }
+
       setSaving(true)
       const saved = await api.saveConnection({
         input,
@@ -238,8 +249,6 @@ export function ConnectionFormModal() {
             : undefined,
       })
       upsertLocal(saved)
-      // 编辑了已连接的连接 → 后端已断开旧会话，同步前端状态
-      if (editing) await useSessionStore.getState().disconnect(editing.id)
       message.success(editing ? '已保存' : `已创建「${saved.name}」`)
       closeForm()
     } catch (e) {
