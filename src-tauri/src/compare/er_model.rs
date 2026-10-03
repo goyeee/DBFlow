@@ -213,6 +213,30 @@ fn fk_item(
     }
 }
 
+/// FK 规则等价比较：None / RESTRICT / NO ACTION 同为「默认」。
+/// information_schema 对未指定规则也返回 RESTRICT/NO ACTION，直接按字段比
+/// 会让「模型未指定 vs 库默认」每轮都出假重建差异
+fn fk_rule_eq(a: Option<&str>, b: Option<&str>) -> bool {
+    let is_default = |r: Option<&str>| {
+        r.map_or(true, |v| v.eq_ignore_ascii_case("RESTRICT") || v.eq_ignore_ascii_case("NO ACTION"))
+    };
+    if is_default(a) && is_default(b) {
+        return true;
+    }
+    a.map(|v| v.to_ascii_uppercase()) == b.map(|v| v.to_ascii_uppercase())
+}
+
+/// FK 语义等价（列映射/引用/规则；规则按默认等价归一化）
+fn fk_def_eq(a: &ForeignKeyDef, b: &ForeignKeyDef) -> bool {
+    a.name == b.name
+        && a.table == b.table
+        && a.columns == b.columns
+        && a.ref_table == b.ref_table
+        && a.ref_columns == b.ref_columns
+        && fk_rule_eq(a.on_delete.as_deref(), b.on_delete.as_deref())
+        && fk_rule_eq(a.on_update.as_deref(), b.on_update.as_deref())
+}
+
 /// 模型外键 vs 库外键：
 /// - FK 所在表 ∈ 模型 schema 表集：按（表, 约束名）匹配，模型有库无 → ADD，
 ///   库有模型无 → DROP（dangerous），都有但定义不同 → 一条 ALTER DROP+ADD 重建
@@ -253,7 +277,7 @@ pub fn diff_foreign_keys(
         match model_idx.get(&key) {
             Some(m) => {
                 handled.insert(key);
-                if **m != *fk {
+                if !fk_def_eq(m, fk) {
                     // 定义变化：一条 ALTER 同时 DROP 旧 + ADD 新（照索引重建模式）
                     items.push(fk_item(
                         DiffAction::Modify,
@@ -393,6 +417,18 @@ pub fn diff_model_vs_db(
         live_fks,
         &m.tombstones,
     ));
+
+    // MySQL 给 FK 自动建同名索引：该索引由 FK 语句管理（ADD/DROP FOREIGN KEY
+    // 隐式增删），不参与索引对比——否则模型里没有它 → 假 DROP INDEX 差异
+    let fk_owned: HashSet<(String, String)> = live_fks
+        .iter()
+        .chain(m.model_fks.iter())
+        .map(|fk| (fk.table.to_lowercase(), fk.name.to_lowercase()))
+        .collect();
+    items.retain(|i| {
+        !(i.kind == DiffKind::Index
+            && fk_owned.contains(&(i.table.to_lowercase(), i.name.to_lowercase())))
+    });
 
     // 分组排序：DROP FK(0) → DROP TABLE(1) → 结构项(2) → ADD/rebuild FK(3)
     let group = |i: &DiffItem| match (i.kind, i.action) {
@@ -633,6 +669,74 @@ mod tests {
         assert!(items.is_empty());
     }
 
+    #[test]
+    fn fk_default_rules_equivalent_to_unspecified() {
+        // information_schema 的 DELETE_RULE/UPDATE_RULE 对未指定规则也返回
+        // RESTRICT/NO ACTION（默认值）——比较时 None/RESTRICT/NO ACTION 视为等价，
+        // 否则每轮都出假重建差异，应用后角标永远消不掉
+        let model_tables: HashSet<String> = ["orders"].iter().map(|s| s.to_string()).collect();
+        let m = fkd("fk_uid", "orders", &["uid"], "users", &["id"]); // None
+        let mut d1 = fkd("fk_uid", "orders", &["uid"], "users", &["id"]);
+        d1.on_delete = Some("RESTRICT".into());
+        d1.on_update = Some("NO ACTION".into());
+        let items = diff_foreign_keys("db", &model_tables, &[m.clone()], &[d1], &HashSet::new());
+        assert!(items.is_empty(), "{items:?}");
+        // 真实差异（CASCADE vs 默认）仍要重建
+        let mut d2 = fkd("fk_uid", "orders", &["uid"], "users", &["id"]);
+        d2.on_delete = Some("CASCADE".into());
+        let items2 = diff_foreign_keys("db", &model_tables, &[m], &[d2], &HashSet::new());
+        assert_eq!(items2.len(), 1);
+        assert_eq!(items2[0].action, DiffAction::Modify);
+    }
+
+    #[test]
+    fn fk_backing_index_not_compared() {
+        // MySQL 给 FK 自动建同名索引：该索引由 FK 语句管理，不参与索引对比，
+        // 否则模型没有它 → 假 DROP INDEX 差异
+        let mut lt = tbl("child", &[("id", "int"), ("pid", "int")]);
+        lt.indexes = vec![
+            crate::datasource::IndexDef {
+                name: "PRIMARY".into(),
+                columns: vec!["id".into()],
+                sub_parts: vec![None],
+                directions: vec![None],
+                unique: true,
+                is_primary: true,
+                index_type: Some("BTREE".into()),
+            },
+            crate::datasource::IndexDef {
+                name: "fk_child_parent".into(), // FK 自动索引
+                columns: vec!["pid".into()],
+                sub_parts: vec![None],
+                directions: vec![None],
+                unique: false,
+                is_primary: false,
+                index_type: Some("BTREE".into()),
+            },
+        ];
+        let l = snap_of("db", vec![lt]);
+        // 模型：同结构但只有 PRIMARY 索引 + 同名 FK
+        let mut src = input("child", &[("id", "int"), ("pid", "int")], &[("fk_child_parent", &["pid"], &["id"])]);
+        if let Some(s) = &mut src.schema {
+            s.table.indexes = vec![crate::datasource::IndexDef {
+                name: "PRIMARY".into(),
+                columns: vec!["id".into()],
+                sub_parts: vec![None],
+                directions: vec![None],
+                unique: true,
+                is_primary: true,
+                index_type: Some("BTREE".into()),
+            }];
+            s.foreign_keys[0].ref_table = "parent".into();
+        }
+        let live_fks = vec![fkd("fk_child_parent", "child", &["pid"], "parent", &["id"])];
+        let items = full_model_diff("db", &[src], &l, &live_fks);
+        assert!(
+            items.iter().all(|i| i.action == DiffAction::Noop || !matches!(i.kind, crate::compare::DiffKind::Index)),
+            "FK 自动索引不应产生差异: {items:?}"
+        );
+    }
+
     fn full_model_diff(db: &str, model: &[ErModelTableInput], l: &SchemaSnapshot, fks: &[ForeignKeyDef]) -> Vec<crate::compare::DiffItem> {
         diff_model_vs_db(db, model, l, fks).unwrap()
     }
@@ -749,6 +853,183 @@ mod tests {
     fn validation_error_propagates() {
         let l = snap_of("db", vec![]);
         assert!(diff_model_vs_db("db", &[input("", &[], &[])], &l, &[]).is_err());
+    }
+
+    // ───────────────── e2e：docker 实例（DBFLOW_E2E=1） ─────────────────
+
+    mod e2e {
+        use super::*;
+        use crate::compare::DiffAction;
+        use crate::config::model::{ConnectionProfile, DatabaseKind, SshAuth, SshTunnelConfig};
+        use crate::datasource::mysql::{self, ConnectEndpoint, MySqlLive};
+        use crate::datasource::LiveConnection;
+
+        fn enabled() -> bool {
+            std::env::var("DBFLOW_E2E").is_ok()
+        }
+
+        /// 双版本端点：本地 docker mysql5.6（demo_fk 所在实例）与 docker/testenv 的 mysql-a（8.4）。
+        /// information_schema 的表名 IN 过滤/排序规则回填等行为在 5.6 与 8.x 都要验一遍
+        async fn conn(port: u16, password: &str) -> MySqlLive {
+            let profile = ConnectionProfile {
+                id: uuid::Uuid::new_v4(),
+                name: "e2e-er-model".into(),
+                group_id: None,
+                color: None,
+                db: DatabaseKind::MySql,
+                host: "127.0.0.1".into(),
+                port,
+                user: "root".into(),
+                default_database: None,
+                has_password: true,
+                ssh_has_password: false,
+                remember_password: false,
+                options: Default::default(),
+                ssh: None,
+                created_at: 0,
+                updated_at: 0,
+            };
+            let _ = SshAuth::Password; // 引用 Ssh 字段所在模块，避免未用告警（与 compare e2e 同构）
+            let _ = std::marker::PhantomData::<SshTunnelConfig>;
+            let endpoint = ConnectEndpoint { host: "127.0.0.1".into(), port };
+            let pool = mysql::open_pool(&profile, &endpoint, Some(password))
+                .await
+                .unwrap_or_else(|e| panic!("连接 127.0.0.1:{port} 失败（容器没起？）: {e}"));
+            MySqlLive::new(pool, None)
+        }
+
+        /// 完整闭环：模型（新表+编辑表+tombstone+模型FK）→ diff → 执行 → 复跑零差异。
+        /// 5.6（demo_fk 所在实例）与 8.4（docker/testenv mysql-a）都跑
+        #[tokio::test]
+        async fn e2e_er_model_roundtrip() {
+            if !enabled() {
+                eprintln!("跳过（未设置 DBFLOW_E2E）");
+                return;
+            }
+            for (port, pw) in [(3306u16, "123123"), (3308u16, "dbflow-a-2026")] {
+                let live = conn(port, pw).await;
+                run_roundtrip(&live).await;
+                live.shutdown().await;
+            }
+        }
+
+        async fn run_roundtrip(live: &MySqlLive) {
+            for sql in [
+                "DROP DATABASE IF EXISTS `dbflow_er_e2e`",
+                "CREATE DATABASE `dbflow_er_e2e` DEFAULT CHARACTER SET utf8mb4",
+                "CREATE TABLE `dbflow_er_e2e`.`keep` (\
+                   `id` bigint unsigned NOT NULL AUTO_INCREMENT,\
+                   `name` varchar(20) NOT NULL,\
+                   PRIMARY KEY (`id`)) ENGINE=InnoDB",
+                "CREATE TABLE `dbflow_er_e2e`.`legacy` (`id` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB",
+                "CREATE TABLE `dbflow_er_e2e`.`parent` (`id` bigint unsigned NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB",
+            ] {
+                live.execute(sql).await.unwrap();
+            }
+
+            // 模型：编辑 keep 加列；新建 child 带 FK 引用 parent；tombstone legacy
+            let keep = input("keep", &[("id", "bigint unsigned"), ("name", "varchar(20)"), ("memo", "varchar(200)")], &[]);
+            let primary_idx = || crate::datasource::IndexDef {
+                name: "PRIMARY".into(),
+                columns: vec!["id".into()],
+                sub_parts: vec![None],
+                directions: vec![None],
+                unique: true,
+                is_primary: true,
+                index_type: Some("BTREE".into()),
+            };
+            let mut child = input("child", &[("id", "bigint unsigned"), ("pid", "bigint unsigned")], &[]);
+            if let Some(s) = &mut child.schema {
+                s.table.indexes = vec![primary_idx()];
+                s.foreign_keys = vec![ForeignKeyDef {
+                    name: "fk_child_parent".into(),
+                    table: "child".into(),
+                    columns: vec!["pid".into()],
+                    ref_table: "parent".into(),
+                    ref_columns: vec!["id".into()],
+                    on_delete: None,
+                    on_update: None,
+                }];
+            }
+            let mut legacy = input("legacy", &[], &[]);
+            legacy.schema = None;
+
+            let snap = live.snapshot_tables("dbflow_er_e2e", None).await.unwrap();
+            let fks = live.list_foreign_keys("dbflow_er_e2e").await.unwrap();
+            let items = diff_model_vs_db("dbflow_er_e2e", &[keep, child, legacy], &snap, &fks).unwrap();
+            let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+            assert!(ids.contains(&"col:keep:memo")
+                && ids.contains(&"tbl:child")
+                && ids.contains(&"tbl:legacy")
+                && ids.contains(&"fk:child:fk_child_parent"), "{ids:?}");
+            // FK 建表之后
+            let pos_child = ids.iter().position(|x| *x == "tbl:child").unwrap();
+            let pos_fk = ids.iter().position(|x| *x == "fk:child:fk_child_parent").unwrap();
+            assert!(pos_fk > pos_child);
+
+            for item in &items {
+                let sql = item.sql.as_deref().expect("每项都应有 SQL");
+                live.execute(sql).await.unwrap_or_else(|e| panic!("执行失败 [{sql}]: {e}"));
+            }
+
+            // 复跑：模型态已与库一致（legacy 已删不再出现在模型里→不传）→ 零差异
+            let keep2 = input("keep", &[("id", "bigint unsigned"), ("name", "varchar(20)"), ("memo", "varchar(200)")], &[]);
+            let mut child2 = input("child", &[("id", "bigint unsigned"), ("pid", "bigint unsigned")], &[]);
+            if let Some(s) = &mut child2.schema {
+                s.table.indexes = vec![primary_idx()];
+                s.foreign_keys = vec![ForeignKeyDef {
+                    name: "fk_child_parent".into(),
+                    table: "child".into(),
+                    columns: vec!["pid".into()],
+                    ref_table: "parent".into(),
+                    ref_columns: vec!["id".into()],
+                    on_delete: None,
+                    on_update: None,
+                }];
+            }
+            let snap2 = live.snapshot_tables("dbflow_er_e2e", None).await.unwrap();
+            let fks2 = live.list_foreign_keys("dbflow_er_e2e").await.unwrap();
+            let remain = diff_model_vs_db("dbflow_er_e2e", &[keep2, child2], &snap2, &fks2).unwrap();
+            assert!(remain.is_empty(), "应用后仍有差异: {:?}", remain.iter().map(|i| &i.id).collect::<Vec<_>>());
+
+            live.execute("DROP DATABASE `dbflow_er_e2e`").await.unwrap();
+        }
+
+        /// 环形外键的两张表一起删除：先 DROP FK 断环再 DROP TABLE，真实可执行
+        #[tokio::test]
+        async fn e2e_circular_fk_drop() {
+            if !enabled() {
+                eprintln!("跳过（未设置 DBFLOW_E2E）");
+                return;
+            }
+            let live = conn(3306, "123123").await;
+            for sql in [
+                "DROP DATABASE IF EXISTS `dbflow_er_circ`",
+                "CREATE DATABASE `dbflow_er_circ` DEFAULT CHARACTER SET utf8mb4",
+                "CREATE TABLE `dbflow_er_circ`.`a` (`id` int NOT NULL, `bid` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB",
+                "CREATE TABLE `dbflow_er_circ`.`b` (`id` int NOT NULL, `aid` int NOT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB",
+                "ALTER TABLE `dbflow_er_circ`.`a` ADD CONSTRAINT `fk_ab` FOREIGN KEY (`bid`) REFERENCES `b` (`id`)",
+                "ALTER TABLE `dbflow_er_circ`.`b` ADD CONSTRAINT `fk_ba` FOREIGN KEY (`aid`) REFERENCES `a` (`id`)",
+            ] {
+                live.execute(sql).await.unwrap();
+            }
+            let mut a = input("a", &[], &[]);
+            a.schema = None;
+            let mut b = input("b", &[], &[]);
+            b.schema = None;
+            let snap = live.snapshot_tables("dbflow_er_circ", None).await.unwrap();
+            let fks = live.list_foreign_keys("dbflow_er_circ").await.unwrap();
+            let items = diff_model_vs_db("dbflow_er_circ", &[a, b], &snap, &fks).unwrap();
+            // FK 全在 DROP TABLE 之前
+            let last_fk = items.iter().rposition(|i| i.kind == DiffKind::ForeignKey).unwrap();
+            let first_tbl = items.iter().position(|i| i.kind == crate::compare::DiffKind::Table).unwrap();
+            assert!(last_fk < first_tbl, "{items:?}");
+            for item in &items {
+                live.execute(item.sql.as_deref().unwrap()).await.unwrap();
+            }
+            live.execute("DROP DATABASE `dbflow_er_circ`").await.unwrap();
+            live.shutdown().await;
+        }
     }
 
     fn live(db: &str, names: &[&str]) -> SchemaSnapshot {
