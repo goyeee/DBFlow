@@ -469,19 +469,32 @@ describe('ER store：编辑与保存', () => {
 // ───────────────── 图上建模（二期 A） ─────────────────
 
 describe('ER store：图上建模', () => {
-  it('createTable 建新表（默认名避开既有表）并打开设计器、置脏', async () => {
+  it('createTable 只打开设计器——未保存不落库（取消即无痕）；保存后才生效并给位置', async () => {
     mockApi(snapWith(true), null)
     await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
     const lower = useErStore.getState().createTable(KEY_A)
     expect(lower).toBe('new_table_1')
-    const t = useErStore.getState().tabs[KEY_A]!
-    expect(t.modelTables.new_table_1.schema?.columns[0].name).toBe('id')
-    expect(t.modelTables.new_table_1.deleted).toBe(false)
-    expect(t.dirty).toBe(true)
+    let t = useErStore.getState().tabs[KEY_A]!
     expect(t.designerTable).toBe('new_table_1')
+    expect(t.designerNewTable).toBe('new_table_1')
+    // 未保存：无模型条目、无节点、不置脏
+    expect(t.modelTables.new_table_1).toBeUndefined()
+    expect(t.graph!.tables.new_table_1).toBeUndefined()
+    expect(t.dirty).toBe(false)
+    // 关闭设计器（取消）→ 待建标记清除，完全无痕
+    useErStore.getState().setDesignerTable(KEY_A, null)
+    t = useErStore.getState().tabs[KEY_A]!
+    expect(t.designerNewTable).toBeNull()
+    // 再次新建并保存 → 落库、画布出现、有位置、置脏
+    useErStore.getState().createTable(KEY_A)
+    const r = useErStore.getState().saveTableSchema(KEY_A, 'new_table_1', newTableSchema('new_table_1'))
+    expect(r.ok).toBe(true)
+    t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.new_table_1.schema?.columns[0].name).toBe('id')
     expect(t.graph!.tables.new_table_1.modelStatus).toBe('new')
-    // graph 里出现新表节点（来自 schema）
-    expect(t.graph!.tables.new_table_1.columns).toHaveLength(1)
+    expect(t.positions.new_table_1).toBeDefined()
+    expect(t.dirty).toBe(true)
+    expect(t.designerNewTable).toBeNull()
     expect(t.snapshot).not.toBeNull()
   })
 
@@ -560,8 +573,9 @@ describe('ER store：图上建模', () => {
     expect(useErStore.getState().tabs[KEY_A]!.modelTables.orders).toEqual({ schema: null, deleted: true })
     useErStore.getState().restoreTable(KEY_A, 'orders')
     expect(useErStore.getState().tabs[KEY_A]!.modelTables.orders).toBeUndefined()
-    // 新建表删除 → 直接消失
+    // 新建表（已保存）删除 → 直接消失
     useErStore.getState().createTable(KEY_A)
+    useErStore.getState().saveTableSchema(KEY_A, 'new_table_1', newTableSchema('new_table_1'))
     useErStore.getState().deleteTable(KEY_A, 'new_table_1')
     t = useErStore.getState().tabs[KEY_A]!
     expect(t.modelTables.new_table_1).toBeUndefined()
@@ -666,8 +680,9 @@ describe('ER store：应用闭环', () => {
     let items = await useErStore.getState().runErDiff(KEY_A)
     expect(items).toEqual([])
     expect(api.erDiff).not.toHaveBeenCalled()
-    // 建表后：payload 只含新表，表名用服务器大小写
+    // 建表并保存后：payload 只含新表，表名用服务器大小写
     useErStore.getState().createTable(KEY_A)
+    useErStore.getState().saveTableSchema(KEY_A, 'new_table_1', newTableSchema('new_table_1'))
     ;(api.erDiff as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
       diffItem({ id: 'tbl:new_table_1', table: 'new_table_1' }),
     ])
@@ -683,7 +698,8 @@ describe('ER store：应用闭环', () => {
     mockApi(snapWith(true), null)
     await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
     const store = useErStore.getState()
-    store.createTable(KEY_A) // new_table_1 → CREATE（应用成功 → 清除）
+    store.createTable(KEY_A) // new_table_1
+    store.saveTableSchema(KEY_A, 'new_table_1', newTableSchema('new_table_1')) // → CREATE（应用成功 → 清除）
     useErStore.getState().addModelFk(KEY_A, { table: 'user_roles', columns: ['usersID'], refTable: 'users', refColumns: ['usersID'] })
     // 手拖走线挂在 mfk 边上
     useErStore.getState().setEdgeRoute(KEY_A, 'mfk:user_roles:fk_user_roles_usersid', [{ x: 9, y: 9 }])
@@ -705,6 +721,7 @@ describe('ER store：应用闭环', () => {
     mockApi(snapWith(true), null)
     await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
     useErStore.getState().createTable(KEY_A)
+    useErStore.getState().saveTableSchema(KEY_A, 'new_table_1', newTableSchema('new_table_1'))
     ;(api.getErSnapshot as ReturnType<typeof vi.fn>).mockResolvedValueOnce(snapWith(true))
     ;(api.erDiff as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
       diffItem({ id: 'tbl:new_table_1', table: 'new_table_1' }), // 未应用（用户没勾）

@@ -24,6 +24,7 @@ import { useErTab, useErTabKey } from './erTabContext'
 import {
   applyColumnNameRename,
   colDraftToSchema,
+  newTableSchema,
   recommendIndexName,
   isIntegerType,
   isTemporalType,
@@ -31,6 +32,7 @@ import {
   snapshotTableToSchema,
 } from './modelSchema'
 import { SqlView } from '../compare/SqlView'
+import { erCanvasApi } from './erCanvasApi'
 import type { ErColumnSchema, ErFkSchema, ErIndexSchema, ErTableSchema } from '../../api/types'
 
 /** 单行草稿的唯一键（增删行稳定 key） */
@@ -150,6 +152,7 @@ interface DesignerDraft {
 export function ErTableDesigner() {
   const tabKey = useErTabKey()
   const designerTable = useErTab((t) => t.designerTable)
+  const designerNewTable = useErTab((t) => t.designerNewTable)
   const graph = useErTab((t) => t.graph)
   const snapshot = useErTab((t) => t.snapshot)
   const modelTables = useErTab((t) => t.modelTables)
@@ -174,9 +177,13 @@ export function ErTableDesigner() {
       modelTables?.[lower]?.schema ??
       (() => {
         const t = snapshot.tables.find((s) => s.name.toLowerCase() === lower)
-        if (!t) return null
-        const fks = snapshot.foreignKeys.filter((f) => f.table.toLowerCase() === lower)
-        return snapshotTableToSchema(t, fks)
+        if (t) {
+          const fks = snapshot.foreignKeys.filter((f) => f.table.toLowerCase() === lower)
+          return snapshotTableToSchema(t, fks)
+        }
+        // 待建新表：模板起草（未保存前 store 不落库，取消即无痕）
+        if (designerNewTable?.toLowerCase() === lower) return newTableSchema(designerNewTable)
+        return null
       })()
     if (!src) {
       setDraft(null)
@@ -193,7 +200,7 @@ export function ErTableDesigner() {
     })
     // graph/snapshot 只在打开/切换表时读一次
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lower])
+  }, [lower, designerNewTable])
 
   const toSchema = useMemo(
     () =>
@@ -240,11 +247,14 @@ export function ErTableDesigner() {
     if (!toSchema) return
     setSaving(true)
     try {
+      const wasNew = !!useErStore.getState().tabs[tabKey]?.designerNewTable
       const r = useErStore.getState().saveTableSchema(tabKey, lower, toSchema as ErTableSchema)
       if (!r.ok) message.warning(r.error ?? '保存失败')
       else {
         message.success('已保存到模型（未应用至库）')
         close()
+        // 新建表保存成功 → 定位到画布上的新节点（节点派生在下一渲染，稍候聚焦）
+        if (wasNew) setTimeout(() => erCanvasApi.focusTable?.(lower), 80)
       }
     } finally {
       setSaving(false)

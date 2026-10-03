@@ -18,7 +18,6 @@ import { inferEdges } from '../components/er/infer'
 import {
   buildErDiffPayload,
   makeModelFk,
-  newTableSchema,
   nextNewTableName,
   schemasEqual,
   snapshotTableToSchema,
@@ -82,6 +81,8 @@ export interface ErTabState {
   modelTables: Record<string, ModelTableState>
   /** 表设计器正在编辑的表（小写；null=关） */
   designerTable: string | null
+  /** 待保存的新建表名——设计器保存成功才落库，取消即无痕 */
+  designerNewTable: string | null
 }
 
 interface ErStore {
@@ -229,6 +230,7 @@ export const useErStore = create<ErStore>((set, get) => {
             editMode: prev?.editMode ?? false,
             modelTables: {},
             designerTable: null,
+            designerNewTable: null,
           },
         },
       }))
@@ -448,27 +450,20 @@ export const useErStore = create<ErStore>((set, get) => {
       }),
 
     setEditMode: (tabKey, v) => patchTab(tabKey, { editMode: v }),
-    setDesignerTable: (tabKey, table) => patchTab(tabKey, { designerTable: table }),
+    setDesignerTable: (tabKey, table) =>
+      patchTab(tabKey, {
+        designerTable: table,
+        // 关闭设计器 = 放弃未保存的新建表（无痕）
+        ...(table === null ? { designerNewTable: null } : {}),
+      }),
 
     createTable: (tabKey) => {
       const t = get().tabs[tabKey]
       if (!t?.graph || !t.snapshot) return null
       const name = nextNewTableName([...Object.keys(t.graph.tables), ...Object.keys(t.modelTables)])
       const lower = name.toLowerCase()
-      // 位置：现有布局左侧堆叠区起点（与 placeFreshTables 同风格）
-      const xs = Object.values(t.positions).map((p) => p.x)
-      const ys = Object.values(t.positions).map((p) => p.y)
-      const pos = {
-        x: (xs.length ? Math.min(...xs) : 0) - 460,
-        y: ys.length ? Math.min(...ys) : 0,
-      }
-      patchTab(tabKey, {
-        modelTables: { ...t.modelTables, [lower]: { schema: newTableSchema(name), deleted: false } },
-        positions: { ...t.positions, [lower]: pos },
-        designerTable: lower,
-        dirty: true,
-      })
-      rebuildGraph(tabKey)
+      // 只打开设计器：保存成功才落库（取消即无痕），位置在保存时补
+      patchTab(tabKey, { designerTable: lower, designerNewTable: name })
       return lower
     },
 
@@ -512,7 +507,27 @@ export const useErStore = create<ErStore>((set, get) => {
         // 防御：tombstone 表理论上进不了设计器；万一保存，保持 deleted 标记
         modelTables[newLower] = { schema, deleted: wasDeleted }
       }
-      patchTab(tabKey, { modelTables, positions, collapsed, designerTable: newLower, dirty: true })
+      // 新建表首次保存：补左侧堆叠位置（与 placeFreshTables 同风格）
+      if (!(newLower in positions)) {
+        positions = { ...positions }
+        const xs = Object.values(positions).map((p) => p.x)
+        const ys = Object.values(positions).map((p) => p.y)
+        positions[newLower] = {
+          x: (xs.length ? Math.min(...xs) : 0) - 460,
+          y: ys.length ? Math.min(...ys) : 0,
+        }
+      }
+      patchTab(tabKey, {
+        modelTables,
+        positions,
+        collapsed,
+        designerTable: newLower,
+        // 待建表已保存成功 → 清标记（后续关闭设计器不再回滚）
+        ...(t.designerNewTable && t.designerNewTable.toLowerCase() === lower
+          ? { designerNewTable: null }
+          : {}),
+        dirty: true,
+      })
       rebuildGraph(tabKey)
       return { ok: true }
     },
