@@ -55,6 +55,14 @@ export function ErApplyModal({ open, onClose }: { open: boolean; onClose: () => 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, tabKey])
 
+  // 差异清单更新后，之前点击的项可能已不存在（已应用/重新比较）→ 清掉，
+  // 否则 DDL 比较会一直显示旧的两侧对比
+  useEffect(() => {
+    if (activeItem && items !== null && !items.some((i) => i.id === activeItem.id)) {
+      setActiveItem(null)
+    }
+  }, [items, activeItem])
+
   const selected = useMemo(
     () => (items ?? []).filter((i) => selectedIds.includes(i.id)),
     [items, selectedIds],
@@ -228,6 +236,7 @@ export function ErApplyModal({ open, onClose }: { open: boolean; onClose: () => 
               onClick={() => {
                 setStep('diff')
                 setItems(null)
+                setActiveItem(null)
                 setError(null)
                 runDiff()
               }}

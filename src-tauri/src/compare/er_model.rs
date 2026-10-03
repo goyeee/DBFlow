@@ -8,8 +8,8 @@ use serde::Deserialize;
 
 use crate::datasource::{ForeignKeyDef, TableDef};
 use crate::compare::sqlgen::{
-    add_foreign_key_clause, column_ddl, describe_column, drop_foreign_key_ddl, foreign_key_ddl,
-    qualified, quote_ident,
+    add_foreign_key_clause, column_ddl, create_table_sql, describe_column, drop_foreign_key_ddl,
+    foreign_key_ddl, qualified, quote_ident,
 };
 use crate::compare::{diff_snapshots, CompareOptions, DiffAction, DiffItem, DiffKind};
 use crate::datasource::{
@@ -386,7 +386,9 @@ pub fn diff_model_vs_db(
     // 列改名检测：同表、同位置、除名字外定义完全一致 → 一条 CHANGE COLUMN
     //（保数据、非危险）。否则改名会落成「加列 + 删列」，删列是危险项默认不勾，
     // 应用后旧列仍在——用户看来就是改名没生效
-    let mut col_renames: Vec<(String, String, String, crate::datasource::ColumnDef)> = Vec::new();
+    // (表, 旧列, 新列, 新定义, 模型侧建表 DDL, 库侧建表 DDL)
+    let mut col_renames: Vec<(String, String, String, crate::datasource::ColumnDef, String, String)> =
+        Vec::new();
     for mt in &m.snapshot.tables {
         let Some(lt) = target
             .tables
@@ -413,12 +415,19 @@ pub fn diff_model_vs_db(
                     && a.collation == b.collation
             };
             if def_eq(mc, lc) {
-                col_renames.push((mt.name.clone(), lc.name.clone(), mc.name.clone(), mc.clone()));
+                col_renames.push((
+                    mt.name.clone(),
+                    lc.name.clone(),
+                    mc.name.clone(),
+                    mc.clone(),
+                    create_table_sql(db, mt),
+                    create_table_sql(db, lt),
+                ));
             }
         }
     }
     let is_paired_col = |i: &DiffItem| -> bool {
-        col_renames.iter().any(|(t, old, new, _)| {
+        col_renames.iter().any(|(t, old, new, ..)| {
             i.kind == DiffKind::Column
                 && i.table.eq_ignore_ascii_case(t)
                 && (i.name.eq_ignore_ascii_case(old) || i.name.eq_ignore_ascii_case(new))
@@ -473,7 +482,7 @@ pub fn diff_model_vs_db(
         })
         .collect();
 
-    for (table, old, new, def) in &col_renames {
+    for (table, old, new, def, src_ddl, tgt_ddl) in &col_renames {
         items.push(DiffItem {
             id: format!("col:{}:{}", table, new),
             kind: DiffKind::Column,
@@ -490,8 +499,8 @@ pub fn diff_model_vs_db(
             )),
             sql_clause: None,
             dangerous: false,
-            source_ddl: None,
-            target_ddl: None,
+            source_ddl: Some(src_ddl.clone()),
+            target_ddl: Some(tgt_ddl.clone()),
             ref_table: None,
         });
     }
@@ -999,6 +1008,9 @@ mod tests {
         assert!(!r.dangerous);
         let sql = r.sql.as_deref().unwrap();
         assert!(sql.contains("ALTER TABLE `db`.`t` CHANGE COLUMN `name` `title` varchar(20)"), "{sql}");
+        // DDL 比较视图：两侧各自形态的完整建表语句（模型含新列名，库含旧列名）
+        assert!(r.source_ddl.as_deref().unwrap_or("").contains("`title`"), "{:?}", r.source_ddl);
+        assert!(r.target_ddl.as_deref().unwrap_or("").contains("`name`"), "{:?}", r.target_ddl);
     }
 
     #[test]
