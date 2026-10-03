@@ -304,3 +304,81 @@ export interface TableApplyResult {
   appliedCount: number
   error: string | null
 }
+
+// ───────────────── ER 图（数据结构可视化） ─────────────────
+
+/** 外键定义。复合外键的 columns/refColumns 按序号一一对应 */
+export interface ForeignKeyDef {
+  name: string
+  table: string
+  columns: string[]
+  refTable: string
+  refColumns: string[]
+  onDelete: string | null
+  onUpdate: string | null
+}
+
+/** ER 快照的列（对比快照的子集语义，字段同 ErColumnDef） */
+export interface ErColumnDef {
+  name: string
+  /** COLUMN_TYPE 全文（整数显示宽度已归一化），如 varchar(255)、bigint unsigned */
+  dataType: string
+  nullable: boolean
+  default: string | null
+  extra: string
+  comment: string | null
+  ordinal: number
+  characterSet: string | null
+  collation: string | null
+}
+
+export interface ErIndexDef {
+  name: string
+  columns: string[]
+  subParts: (number | null)[]
+  directions: (string | null)[]
+  unique: boolean
+  isPrimary: boolean
+  indexType: string | null
+}
+
+export interface ErTableDef {
+  name: string
+  engine: string | null
+  collation: string | null
+  comment: string | null
+  columns: ErColumnDef[]
+  indexes: ErIndexDef[]
+}
+
+/** ER 图一次逆向的全量数据：表结构 + 外键 */
+export interface ErSnapshot {
+  tables: ErTableDef[]
+  foreignKeys: ForeignKeyDef[]
+  serverVersion: string | null
+}
+
+/** ER 模型文档（.er.json）：只存"图"的信息（布局/关系裁决），列结构每次从库实时取。
+ *  纯文本可 git diff/合并，为多人协作预留 */
+export interface ErModelDoc {
+  formatVersion: 1
+  kind: DatabaseKind
+  database: string
+  origin: { connectionName: string; capturedAt: string }
+  tables: { id: string; name: string; x: number; y: number; collapsed: boolean }[]
+  edges: ErDocEdge[]
+}
+
+export interface ErDocEdge {
+  id: string
+  kind: 'fk' | 'inferred' | 'manual'
+  /** inferred 边的用户裁决；fk/manual 边无此字段 */
+  status?: 'confirmed' | 'ignored'
+  source: { table: string; column: string }
+  target: { table: string; column: string }
+  /** 用户手拖出的连线路途经点（画布坐标）；无则自动走线 */
+  via?: { x: number; y: number }[]
+  /** 用户手拖出的端点锚点（面 + 沿面比例 0–1）；无则自动均布 */
+  sourceAnchor?: { side: 'left' | 'right' | 'top' | 'bottom'; pos: number }
+  targetAnchor?: { side: 'left' | 'right' | 'top' | 'bottom'; pos: number }
+}

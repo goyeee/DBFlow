@@ -5,6 +5,8 @@ import {
   EllipsisOutlined,
   FolderAddOutlined,
   ImportOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
   PlusOutlined,
   ReloadOutlined,
   SettingOutlined,
@@ -22,6 +24,8 @@ export function TitleBar() {
   const openForm = useUiStore((s) => s.openForm)
   const openGroupModal = useUiStore((s) => s.openGroupModal)
   const setNavicatOpen = useUiStore((s) => s.setNavicatOpen)
+  const siderCollapsed = useUiStore((s) => s.siderCollapsed)
+  const toggleSider = useUiStore((s) => s.toggleSider)
   const openSyncSchema = useCompareStore((s) => s.openModal)
   const openDataSync = useDataCompareStore((s) => s.openModal)
   const load = useConnectionsStore((s) => s.load)
@@ -66,6 +70,16 @@ export function TitleBar() {
         <img src="/logo.png" alt="DBFlow" className="titlebar-logo-img" />
       </div>
       <Space size={2} className="titlebar-actions" data-tauri-drag-region="no-drag">
+        <Tooltip title={siderCollapsed ? '显示侧边栏' : '隐藏侧边栏'} placement="bottom">
+          <Button
+            type="text"
+            size="small"
+            className="titlebar-btn"
+            data-tauri-drag-region="no-drag"
+            icon={siderCollapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+            onClick={toggleSider}
+          />
+        </Tooltip>
         <Tooltip title="新建连接" placement="bottom">
           <Button
             type="text"

@@ -12,7 +12,15 @@ export interface TableTab {
   preview?: boolean
 }
 
-export type WorkTab = TableTab
+/** ER 图标签：一个库一个标签（key 末段固定 __er__ 防与表名撞车） */
+export interface ErTab {
+  key: string
+  type: 'er'
+  connectionId: string
+  database: string
+}
+
+export type WorkTab = TableTab | ErTab
 
 interface SessionState {
   /** connectionId → 连接结果 */
@@ -38,6 +46,8 @@ interface SessionState {
   previewTable: (connectionId: string, database: string, table: string) => void
   /** 双击表/另存预览：正式打开 */
   openTable: (connectionId: string, database: string, table: string) => void
+  /** 打开库的 ER 图标签（已存在则激活） */
+  openErTab: (connectionId: string, database: string) => void
   closeTab: (key: string) => void
   /** 关闭除 key 外的所有标签（key 不存在时清空全部） */
   closeOtherTabs: (key: string) => void
@@ -100,8 +110,8 @@ export const useSessionStore = create<SessionState>((set, get) => {
       for (const [k, v] of Object.entries(s.tablesCache)) {
         if (!k.startsWith(`${id}/`)) tablesCache[k] = v
       }
-      // 关掉该连接下所有打开的表标签
-      const tabs = s.tabs.filter((t) => t.type === 'table' && t.connectionId !== id)
+      // 关掉该连接下所有打开的标签（表 + ER 图）
+      const tabs = s.tabs.filter((t) => t.connectionId !== id)
       const activeTab =
         s.activeTab && tabs.some((t) => t.key === s.activeTab) ? s.activeTab : tabs[0]?.key ?? null
       return { connected, dbsCache, tablesCache, tabs, activeTab }
@@ -143,7 +153,7 @@ export const useSessionStore = create<SessionState>((set, get) => {
       if (existing) {
         return { activeTab: key }
       }
-      const previewIdx = s.tabs.findIndex((t) => t.preview)
+      const previewIdx = s.tabs.findIndex((t) => t.type === 'table' && t.preview)
       const tab: TableTab = {
         key,
         type: 'table',
@@ -165,9 +175,11 @@ export const useSessionStore = create<SessionState>((set, get) => {
     set((s) => {
       const idx = s.tabs.findIndex((t) => t.key === key)
       if (idx !== -1) {
-        if (s.tabs[idx].preview) {
+        // 表标签的 key 含表名，与 ER 标签（__er__ 后缀）不冲突，可安全断言
+        const existing = s.tabs[idx] as TableTab
+        if (existing.preview) {
           const tabs = [...s.tabs]
-          tabs[idx] = { ...tabs[idx], preview: false }
+          tabs[idx] = { ...existing, preview: false }
           return { tabs, activeTab: key }
         }
         return { activeTab: key }
@@ -180,6 +192,15 @@ export const useSessionStore = create<SessionState>((set, get) => {
         table,
         preview: false,
       }
+      return { tabs: [...s.tabs, tab], activeTab: key }
+    })
+  },
+
+  openErTab: (connectionId, database) => {
+    const key = `${connectionId}/${database}/__er__`
+    set((s) => {
+      if (s.tabs.some((t) => t.key === key)) return { activeTab: key }
+      const tab: ErTab = { key, type: 'er', connectionId, database }
       return { tabs: [...s.tabs, tab], activeTab: key }
     })
   },

@@ -43,6 +43,7 @@ hex = "0.4"
 quick-xml = "0.41"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.23.1"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"

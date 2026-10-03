@@ -15,6 +15,8 @@ import type {
   ConnectionProfileInput,
   ConnectResult,
   DatabaseBrief,
+  ErModelDoc,
+  ErSnapshot,
   NavicatCandidate,
   NavicatImportResult,
   NavicatImportSelection,
@@ -164,4 +166,22 @@ export const api = {
   ),
 
   openConfigDir: () => invoke<void>('open_config_dir'),
+
+  // ER 图（数据结构可视化）
+  getErSnapshot: (connectionId: string, database: string) =>
+    invoke<ErSnapshot>('get_er_snapshot', { connectionId, database }),
+  loadErModel: (connectionId: string, database: string) =>
+    invoke<ErModelDoc | null>('load_er_model', { connectionId, database }),
+  saveErModel: (connectionId: string, database: string, doc: ErModelDoc) =>
+    invoke<void>('save_er_model', { connectionId, database, doc }),
+  deleteErModel: (connectionId: string, database: string) =>
+    invoke<void>('delete_er_model', { connectionId, database }),
+  exportErModel: (path: string, doc: ErModelDoc) =>
+    invoke<void>('export_er_model', { path, doc }),
+  exportErSql: (path: string, sql: string) =>
+    invoke<void>('export_er_sql', { path, sql }),
+  exportErImage: (path: string, dataUrl: string) =>
+    invoke<void>('export_er_image', { path, dataUrl }),
+  exportTablesDdl: (connectionId: string, database: string, tables: string[]) =>
+    invoke<string>('export_tables_ddl', { connectionId, database, tables }),
 }

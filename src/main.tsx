@@ -5,6 +5,7 @@ import zhCN from 'antd/locale/zh_CN'
 import dayjs from 'dayjs'
 import 'dayjs/locale/zh-cn'
 import App from './App'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import './styles.css'
 
 dayjs.locale('zh-cn')
@@ -26,7 +27,9 @@ document.addEventListener('contextmenu', (e) => {
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
     <ConfigProvider locale={zhCN} theme={{}}>
-      <App />
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
     </ConfigProvider>
   </React.StrictMode>,
 )

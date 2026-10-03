@@ -4,7 +4,7 @@
 //! - 字符串字面量/注释用单引号包裹（内部单引号转义为两个）
 //! - 默认值按列类型决定是否加引号（information_schema 返回的是裸值文本）
 //! - 生成 5.6 / 8.x 都可执行的语法
-use crate::datasource::{ColumnDef, IndexDef, TableDef};
+use crate::datasource::{ColumnDef, ForeignKeyDef, IndexDef, TableDef};
 
 /// 标识符转义：`a``b` 形式
 pub fn quote_ident(name: &str) -> String {
@@ -150,14 +150,25 @@ pub fn describe_table_options(t: &TableDef) -> String {
     parts.join(" ")
 }
 
-/// 索引 DDL 片段：PRIMARY KEY (`id`) / UNIQUE KEY `uk` (`a`,`b`) / KEY `k` (`a`)
+/// 索引 DDL 片段：PRIMARY KEY (`id`) / UNIQUE KEY `uk` / FULLTEXT KEY / SPATIAL KEY / KEY
 fn index_ddl(i: &IndexDef) -> String {
     let cols = index_column_specs(i).join(",");
     if i.is_primary {
         format!("PRIMARY KEY ({cols})")
     } else {
-        let prefix = if i.unique { "UNIQUE " } else { "" };
-        format!("{prefix}KEY {} ({cols})", quote_ident(&i.name))
+        // FULLTEXT/SPATIAL 必须保留其类型前缀，否则会被建成普通二级索引、语义改变
+        let kind = match i.index_type.as_deref() {
+            Some("FULLTEXT") => "FULLTEXT ",
+            Some("SPATIAL") => "SPATIAL ",
+            _ => {
+                if i.unique {
+                    "UNIQUE "
+                } else {
+                    ""
+                }
+            }
+        };
+        format!("{kind}KEY {} ({cols})", quote_ident(&i.name))
     }
 }
 
@@ -196,9 +207,29 @@ pub fn create_table_sql(db: &str, t: &TableDef) -> String {
     sql
 }
 
+/// 外键 DDL（ER 图导出 DDL 用；同步流程暂不涉及外键）
+pub fn foreign_key_ddl(db: &str, fk: &ForeignKeyDef) -> String {
+    let cols = fk.columns.iter().map(|c| quote_ident(c)).collect::<Vec<_>>().join(", ");
+    let ref_cols = fk.ref_columns.iter().map(|c| quote_ident(c)).collect::<Vec<_>>().join(", ");
+    let mut sql = format!(
+        "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
+        qualified(db, &fk.table),
+        quote_ident(&fk.name),
+        cols,
+        qualified(db, &fk.ref_table),
+        ref_cols
+    );
+    if let Some(d) = &fk.on_delete {
+        sql.push_str(&format!(" ON DELETE {d}"));
+    }
+    if let Some(u) = &fk.on_update {
+        sql.push_str(&format!(" ON UPDATE {u}"));
+    }
+    sql
+}
+
 /// ADD 子句（不含 ALTER TABLE 前缀），供同表多个列变更合并为一条 ALTER 时复用
-pub fn add_column_clause(c: &ColumnDef, after: Option<&str>) -> String {
-    let mut sql = format!("ADD COLUMN {}", column_ddl(c));
+pub fn add_column_clause(c: &ColumnDef, after: Option<&str>) -> String {    let mut sql = format!("ADD COLUMN {}", column_ddl(c));
     match after {
         Some(prev) => sql.push_str(&format!(" AFTER {}", quote_ident(prev))),
         None => sql.push_str(" FIRST"),
@@ -338,6 +369,30 @@ mod tests {
     }
 
     #[test]
+    fn foreign_key_ddl_variants() {
+        use crate::datasource::ForeignKeyDef;
+        let fk = |name: &str, table: &str, cols: &[&str], rt: &str, rc: &[&str], del: Option<&str>, upd: Option<&str>| ForeignKeyDef {
+            name: name.into(),
+            table: table.into(),
+            columns: cols.iter().map(|s| s.to_string()).collect(),
+            ref_table: rt.into(),
+            ref_columns: rc.iter().map(|s| s.to_string()).collect(),
+            on_delete: del.map(str::to_string),
+            on_update: upd.map(str::to_string),
+        };
+        // 单列 + 完整规则
+        assert_eq!(
+            foreign_key_ddl("db", &fk("fk_order", "order_items", &["order_id"], "orders", &["id"], Some("CASCADE"), Some("RESTRICT"))),
+            "ALTER TABLE `db`.`order_items` ADD CONSTRAINT `fk_order` FOREIGN KEY (`order_id`) REFERENCES `db`.`orders` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT"
+        );
+        // 复合列、无规则
+        assert_eq!(
+            foreign_key_ddl("db", &fk("fk_multi", "t1", &["a", "b"], "t2", &["x", "y"], None, None)),
+            "ALTER TABLE `db`.`t1` ADD CONSTRAINT `fk_multi` FOREIGN KEY (`a`, `b`) REFERENCES `db`.`t2` (`x`, `y`)"
+        );
+    }
+
+    #[test]
     fn column_ddl_variants() {
         assert_eq!(column_ddl(&c("id", "bigint unsigned", false, None)), "`id` bigint unsigned NOT NULL");
         // 字符串默认值加引号
@@ -403,5 +458,23 @@ mod tests {
             add_column_clause(&c("x", "int", true, None), None),
             "ADD COLUMN `x` int NULL FIRST"
         );
+    }
+
+    #[test]
+    fn index_ddl_special_types() {
+        let mk = |name: &str, ty: &str| IndexDef {
+            name: name.into(),
+            columns: vec!["c".into()],
+            sub_parts: vec![],
+            directions: vec![],
+            unique: false,
+            is_primary: false,
+            index_type: Some(ty.into()),
+        };
+        // FULLTEXT/SPATIAL 不得降级为普通 KEY
+        assert_eq!(index_ddl(&mk("ft_body", "FULLTEXT")), "FULLTEXT KEY `ft_body` (`c`)");
+        assert_eq!(index_ddl(&mk("sp_loc", "SPATIAL")), "SPATIAL KEY `sp_loc` (`c`)");
+        // 普通 BTREE 仍为 KEY
+        assert_eq!(index_ddl(&mk("k", "BTREE")), "KEY `k` (`c`)");
     }
 }

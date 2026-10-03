@@ -112,10 +112,17 @@ textarea,
   border-right: 1px solid var(--df-border);
 }
 
+/* 折叠到 0 宽时去掉右边框，避免留下一条竖线（类名由 antd Sider 自动加） */
+.sider.ant-layout-sider-collapsed {
+  border-right-color: transparent;
+}
+
 .sider > .ant-layout-sider-children {
   display: flex;
   flex-direction: column;
   height: 100%;
+  /* 折叠动画收窄过程中裁掉头/体内容，防止按钮溢出 */
+  overflow: hidden;
 }
 
 .sider-header {
@@ -1234,4 +1241,526 @@ textarea,
   gap: 8px;
   font-size: 12px;
   color: #666;
+}
+
+/* ───────────────── ER 图 ───────────────── */
+
+/* antd Tabs 高度链（类名经 DOM 实测，antd 6.6）：
+   .content → .ant-tabs → .ant-tabs-body-holder → .ant-tabs-body
+   → .ant-tabs-content → .ant-tabs-tabpane → .er-view → .er-body
+   默认 .ant-tabs 按内容收缩（flex:0 1 auto，无确定高），整链塌陷，
+   依赖确定高度的 ER 画布高为 0、不可见。逐环补 flex 高度，
+   !important 压过 antd CSS-in-JS，避免多标签切换后复塌陷 */
+.content > .ant-tabs {
+  display: flex !important;
+  flex-direction: column !important;
+  height: 100% !important;
+}
+.ant-tabs-body-holder {
+  flex: 1 1 0% !important;
+  min-height: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+.ant-tabs-body {
+  flex: 1 1 0% !important;
+  min-height: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+.ant-tabs-content {
+  flex: 1 1 0% !important;
+  min-height: 0 !important;
+}
+.ant-tabs-tabpane {
+  height: 100% !important;
+}
+
+.er-view {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.er-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 12px;
+  border-bottom: 1px solid #f0f0f0;
+  flex: none;
+}
+.er-toolbar-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #595959;
+  font-size: 12px;
+}
+.er-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+.er-canvas {
+  position: absolute;
+  inset: 0;
+}
+.er-center {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 表节点 */
+.er-table-node {
+  width: 260px;
+  background: #fff;
+  border: 1px solid #d9d9d9;
+  border-radius: 8px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+  font-size: 12px;
+  overflow: hidden;
+}
+.er-table-highlight {
+  border-color: #1677ff;
+  box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.15);
+}
+.er-table-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  background: #fafafa;
+  border-bottom: 1px solid #f0f0f0;
+  font-weight: 600;
+  cursor: pointer;
+}
+.er-table-collapsed .er-table-header {
+  border-bottom: none;
+}
+.er-table-name {
+  color: rgba(0, 0, 0, 0.88);
+  /* 表名保持完整不被注释挤压，注释负责 ellipsis */
+  flex: none;
+}
+.er-table-comment {
+  flex: 1;
+  min-width: 0;
+  color: #999;
+  font-weight: 400;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 头部折叠按钮：贴右，悬停变蓝 */
+.er-table-fold {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  color: #999;
+  font-size: 10px;
+  cursor: pointer;
+}
+.er-table-fold:hover {
+  color: #1677ff;
+}
+/* 搜索命中的列行高亮 */
+.er-col-row.er-col-match {
+  background: #e6f4ff;
+}
+.er-col-row.er-col-match .er-col-name {
+  color: #1677ff;
+  font-weight: 600;
+}
+.er-col-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  position: relative;
+  line-height: 18px;
+}
+.er-col-row:hover {
+  background: #f5f5f5;
+}
+.er-col-pk {
+  color: #faad14;
+  font-size: 11px;
+}
+.er-col-name {
+  color: rgba(0, 0, 0, 0.78);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.er-col-name-pk {
+  font-weight: 600;
+}
+.er-col-type {
+  margin-left: auto;
+  color: #999;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.er-handle {
+  width: 6px;
+  height: 6px;
+  min-width: 6px;
+  min-height: 6px;
+  background: #b7c6e3;
+  border: none;
+  /* 默认隐藏连接点，悬停列行时才显现，避免大表两侧蓝点杂乱 */
+  opacity: 0;
+}
+/* RF 默认把 Handle 偏移到节点外 4px，会被 .er-table-node 的 overflow:hidden
+   裁掉一半导致拖拽热区只有 2px——拉回行内，悬停时放大更好拖 */
+.er-col-row .react-flow__handle-left {
+  left: 1px;
+}
+.er-col-row .react-flow__handle-right {
+  right: 1px;
+}
+.er-col-row:hover .er-handle {
+  opacity: 1;
+  width: 9px;
+  height: 9px;
+}
+/* 表级锚点 Handle：只给关系线提供均布挂点，隐形且不响应鼠标（拖拽创建走列行 Handle） */
+.er-handle-anchor {
+  width: 1px;
+  height: 1px;
+  min-width: 1px;
+  min-height: 1px;
+  opacity: 0;
+  border: none;
+  background: transparent;
+  pointer-events: none;
+}
+/* 框选/点选的明确描边（React Flow 的 selected 作用于节点外层 wrapper） */
+.react-flow__node.selected .er-table-node {
+  border-color: #1677ff;
+  box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.25);
+}
+.er-handle-ghost {
+  opacity: 0;
+  width: 4px;
+  height: 4px;
+  min-width: 4px;
+  min-height: 4px;
+  pointer-events: none;
+}
+
+/* 边（只命中 BaseEdge 的可见路径 .react-flow__edge-path；
+   不写裸 path——CSS 的 stroke-width 会覆盖热区透明宽线的 strokeWidth 属性，
+   曾把悬停命中宽压回 1.4px，导致"必须点到线的特定位置"才出提示） */
+.er-edge-fk .react-flow__edge-path {
+  stroke: #5b8def;
+  stroke-width: 1.4;
+}
+/* 手动关联：实线紫，与真实 FK（实线蓝）、推断（虚线）一眼可分 */
+.er-edge-manual .react-flow__edge-path {
+  stroke: #722ed1;
+  stroke-width: 1.4;
+}
+.er-edge-inferred .react-flow__edge-path {
+  stroke: #bfbfbf;
+  stroke-width: 1.2;
+  stroke-dasharray: 6 4;
+}
+/* 已确认的推断边仍保留虚线（确认蓝），与真实 FK 的实线永久可分，
+   避免读者把"人猜的"当成"库里真实存在的约束" */
+.er-edge-inferred-ok .react-flow__edge-path {
+  stroke: #1677ff;
+  stroke-width: 1.4;
+  stroke-dasharray: 6 4;
+}
+/* 左键单击选中的连线高亮（信息/裁决/恢复走线等操作在右键弹框）。
+   只命中 BaseEdge 的可见路径，不影响拖拽热区透明宽线 */
+.react-flow__edge.er-edge-selected .react-flow__edge-path {
+  stroke: #fa8c16;
+  stroke-width: 2.4;
+}
+
+/* 连线拖拽手柄（EdgeLabelRenderer 层，默认低调，悬停放大） */
+.er-wp {
+  position: absolute;
+  pointer-events: all;
+  border-radius: 50%;
+  cursor: grab;
+}
+.er-wp:active {
+  cursor: grabbing;
+}
+/* 表节点内文字一律不可选（节点是图形不是文本，拖连线/框选时不应刷出选区） */
+.er-table-node,
+.er-table-node * {
+  user-select: none;
+}
+/* 拖动连线期间画布整体禁选 + 抓手光标 */
+.er-canvas.er-dragging,
+.er-canvas.er-dragging * {
+  user-select: none !important;
+  cursor: grabbing !important;
+}
+/* 拖动期间隐藏边信息浮层，不挡视线 */
+.er-canvas.er-dragging .er-edge-tip {
+  display: none;
+}
+/* 段中点：新增途经点入口，半透明小点 */
+.er-wp-mid {
+  width: 8px;
+  height: 8px;
+  background: rgba(114, 46, 209, 0.25);
+  border: 1px solid rgba(114, 46, 209, 0.5);
+}
+.er-wp-mid:hover {
+  background: rgba(114, 46, 209, 0.65);
+}
+/* 已有途经点：实心紫点，双击可删 */
+.er-wp-dot {
+  width: 10px;
+  height: 10px;
+  background: #722ed1;
+  border: 2px solid #fff;
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.35);
+}
+/* 端点（连接位置）：空心紫圈，拖动可锚到表的任意面任意高度 */
+.er-wp-end {
+  width: 11px;
+  height: 11px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 2px solid rgba(114, 46, 209, 0.55);
+}
+.er-wp-end:hover {
+  border-color: #722ed1;
+}
+/* 导出 PNG 时不渲染手柄 */
+.er-exporting .er-wp {
+  display: none;
+}
+/* 对齐引导线：拖调整点吸附到水平/垂直对齐时显示，橙色虚线与连线色系区分开 */
+.er-guide {
+  stroke: #fa541c;
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+  pointer-events: none;
+}
+/* 导出 PNG 时不渲染引导线 */
+.er-exporting .er-guide {
+  display: none;
+}
+/* 拖动表时的智能对齐引导线：与其他表的边/中线对齐时显示，橙色虚线（DOM 层，不随缩放变粗） */
+.er-node-guides {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 40;
+}
+.er-node-guides .er-ng {
+  position: absolute;
+}
+.er-node-guides .er-ng-v {
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px dashed #fa541c;
+}
+.er-node-guides .er-ng-h {
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 1px dashed #fa541c;
+}
+
+/* 小地图：包装层 + 右上角关闭按钮；关闭后右下角留「小地图」重开按钮 */
+.er-minimap-wrap {
+  position: absolute;
+  right: 15px;
+  bottom: 15px;
+  z-index: 5;
+}
+.er-minimap-wrap .react-flow__panel {
+  position: static;
+  margin: 0;
+}
+.er-minimap-close {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid #d9d9d9;
+  background: #fff;
+  color: #999;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+.er-minimap-close:hover {
+  color: #333;
+  border-color: #999;
+}
+.er-minimap-open {
+  position: absolute;
+  right: 15px;
+  bottom: 15px;
+  z-index: 5;
+  border: 1px solid #d9d9d9;
+  background: #fff;
+  color: #666;
+  font-size: 12px;
+  border-radius: 6px;
+  padding: 2px 10px;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+.er-minimap-open:hover {
+  color: #1677ff;
+  border-color: #1677ff;
+}
+/* 导出 PNG 不带小地图开关按钮 */
+.er-exporting .er-minimap-close,
+.er-exporting .er-minimap-open {
+  display: none;
+}
+
+/* 边 hover 跟随提示框（不拦截鼠标） */
+.er-edge-tip {
+  position: fixed;
+  z-index: 1000;
+  pointer-events: none;
+  background: rgba(0, 0, 0, 0.78);
+  color: #fff;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+/* hover / 左键选中边 / 点字段点亮关联时两端节点高亮。
+ * 选中表联动（tsel）不给关联表加边框——只点亮参与列与关系线，
+ * 关联表不能呈现「选中态」，否则会和真正的表选中混淆 */
+.er-node-related .er-table-node,
+.er-node-sel .er-table-node,
+.er-node-fpick .er-table-node {
+  border-color: #1677ff;
+  box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.28);
+}
+/* 悬停/选中关系线、选中表联动、点字段点亮时，两端表中参与该关系的列行：橙色高亮并轻微放大 */
+.er-col-row.er-col-related,
+.er-col-row.er-col-sel,
+.er-col-row.er-col-tsel,
+.er-col-row.er-col-fpick {
+  background: rgba(250, 140, 22, 0.16);
+  transform: scale(1.06);
+  transform-origin: left center;
+  z-index: 1;
+  border-radius: 3px;
+}
+.er-col-row.er-col-related .er-col-name,
+.er-col-row.er-col-sel .er-col-name,
+.er-col-row.er-col-tsel .er-col-name,
+.er-col-row.er-col-fpick .er-col-name {
+  font-weight: 700;
+  color: #d46b08;
+}
+/* 边点击信息弹窗内容 */
+.er-edge-info {
+  font-size: 12px;
+  line-height: 20px;
+}
+.er-edge-info-hint {
+  margin-top: 6px;
+  color: #999;
+}
+
+.er-fk-list {
+  margin: 0;
+  padding-left: 18px;
+}
+/* 抽屉里手动关联行的删除入口 */
+.er-rel-remove {
+  margin-left: 8px;
+  font-size: 12px;
+  color: #ff4d4f;
+}
+
+/* 添加手动关联对话框 */
+.er-manual-form {
+  padding: 4px 0;
+}
+.er-manual-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.er-manual-label {
+  flex: none;
+  width: 60px;
+  color: #666;
+  font-size: 12px;
+}
+.er-manual-arrow {
+  padding: 6px 0 6px 60px;
+  color: #999;
+}
+.er-manual-hint {
+  margin-top: 12px;
+  color: #999;
+  font-size: 12px;
+  line-height: 18px;
+}
+/* 画布顶部提示条（模型文档失败 / 推断边超限） */
+.er-notice {
+  margin: 6px 8px 0;
+}
+.er-fk-list li {
+  margin-bottom: 4px;
+}
+/* 抽屉关系区的来源小标题（真实外键 / 命名推断） */
+.er-rel-group {
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(0, 0, 0, 0.65);
+}
+.er-fk-rule {
+  color: #999;
+  font-size: 11px;
+}
+.er-muted {
+  color: #999;
+}
+.er-ddl-pre {
+  max-height: 420px;
+  overflow: auto;
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  padding: 10px;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+/* 错误边界堆栈展示 */
+.error-boundary-stack {
+  max-height: 240px;
+  overflow: auto;
+  text-align: left;
+  font-size: 12px;
+  line-height: 18px;
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-all;
 }

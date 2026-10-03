@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../api/commands', () => ({ api: {} }))
 
-import { useSessionStore } from './session'
+import { useSessionStore, type TableTab } from './session'
 
 const initialState = useSessionStore.getState()
 
@@ -15,7 +15,7 @@ describe('标签页：预览与正式打开', () => {
     useSessionStore.getState().previewTable('c1', 'db1', 't1')
     const s = useSessionStore.getState()
     expect(s.tabs).toHaveLength(1)
-    expect(s.tabs[0].preview).toBe(true)
+    expect((s.tabs[0] as TableTab).preview).toBe(true)
     expect(s.activeTab).toBe('c1/db1/t1')
   })
 
@@ -25,7 +25,7 @@ describe('标签页：预览与正式打开', () => {
     const s = useSessionStore.getState()
     expect(s.tabs).toHaveLength(1)
     expect(s.tabs[0].key).toBe('c1/db1/t2')
-    expect(s.tabs[0].preview).toBe(true)
+    expect((s.tabs[0] as TableTab).preview).toBe(true)
   })
 
   it('双击（openTable）把预览标签转正', () => {
@@ -33,7 +33,7 @@ describe('标签页：预览与正式打开', () => {
     useSessionStore.getState().openTable('c1', 'db1', 't1')
     const s = useSessionStore.getState()
     expect(s.tabs).toHaveLength(1)
-    expect(s.tabs[0].preview).toBe(false)
+    expect((s.tabs[0] as TableTab).preview).toBe(false)
   })
 
   it('openTable 新表时保留已有预览标签并新增正式标签', () => {
@@ -50,7 +50,7 @@ describe('标签页：预览与正式打开', () => {
     useSessionStore.getState().previewTable('c1', 'db1', 't1')
     const s = useSessionStore.getState()
     expect(s.tabs).toHaveLength(1)
-    expect(s.tabs[0].preview).toBe(false)
+    expect((s.tabs[0] as TableTab).preview).toBe(false)
   })
 })
 
@@ -110,5 +110,43 @@ describe('标签页：批量关闭', () => {
     const s = useSessionStore.getState()
     expect(s.tabs).toHaveLength(3)
     expect(s.activeTab).toBe('c1/db1/t2')
+  })
+})
+
+describe('ER 标签页', () => {
+  it('openErTab 打开 er 标签，key 为 连接/库/__er__', () => {
+    useSessionStore.getState().openErTab('c1', 'db1')
+    const s = useSessionStore.getState()
+    expect(s.tabs).toHaveLength(1)
+    expect(s.tabs[0]).toMatchObject({ type: 'er', key: 'c1/db1/__er__', database: 'db1' })
+    expect(s.activeTab).toBe('c1/db1/__er__')
+  })
+
+  it('重复打开同一库的 ER 图只激活已有标签', () => {
+    useSessionStore.getState().openErTab('c1', 'db1')
+    useSessionStore.getState().openTable('c1', 'db1', 't1')
+    useSessionStore.getState().openErTab('c1', 'db1')
+    const s = useSessionStore.getState()
+    expect(s.tabs).toHaveLength(2)
+    expect(s.activeTab).toBe('c1/db1/__er__')
+  })
+
+  it('关闭数据库标签时连同该库的 ER 标签一起关闭', () => {
+    useSessionStore.getState().openTable('c1', 'db1', 't1')
+    useSessionStore.getState().openErTab('c1', 'db1')
+    useSessionStore.getState().openErTab('c1', 'db2')
+    useSessionStore.getState().closeDatabaseTabs('c1', 'db1')
+    const s = useSessionStore.getState()
+    expect(s.tabs.map((t) => t.key)).toEqual(['c1/db2/__er__'])
+  })
+
+  it('断开连接时关闭该连接的所有标签（含 ER）', async () => {
+    const { api } = await import('../api/commands')
+    ;(api as Record<string, unknown>).disconnect = vi.fn().mockResolvedValue(undefined)
+    useSessionStore.getState().openErTab('c1', 'db1')
+    useSessionStore.getState().openTable('c2', 'db1', 't1')
+    await useSessionStore.getState().disconnect('c1')
+    const s = useSessionStore.getState()
+    expect(s.tabs.map((t) => t.key)).toEqual(['c2/db1/t1'])
   })
 })
