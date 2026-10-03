@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 
 import { api } from '../api/commands'
-import type { ErModelDoc, ErSnapshot, ErTableSchema } from '../api/types'
+import type { DiffItem, ErModelDoc, ErSnapshot, ErTableSchema } from '../api/types'
 import { errText } from '../components/connection/ConnectionTree'
 import {
   buildErGraph,
@@ -16,6 +16,7 @@ import {
 } from '../components/er/transform'
 import { inferEdges } from '../components/er/infer'
 import {
+  buildErDiffPayload,
   makeModelFk,
   newTableSchema,
   nextNewTableName,
@@ -130,6 +131,11 @@ interface ErStore {
   /** 画布拖线建模型外键（子表 copy-on-edit） */
   addModelFk: (tabKey: string, input: ModelFkInput) => { ok: boolean; error?: string }
   removeModelFk: (tabKey: string, tableLower: string, fkName: string) => void
+  /** 应用变更第一步：模型 vs 库实时结构 diff */
+  runErDiff: (tabKey: string) => Promise<DiffItem[]>
+  /** 应用后刷新：拉新快照重建图 → 复跑 diff → 零差异表清条目（角标消失），
+   *  mfk 走线按需迁移到 fk 边 id → 自动保存文档。返回剩余差异（弹窗「重新比较」用） */
+  refreshAfterApply: (tabKey: string) => Promise<DiffItem[]>
   /** 关闭模型文档读取失败提示条 */
   dismissDocIssue: (tabKey: string) => void
   setSelectedTable: (tabKey: string, table: string | null) => void
@@ -601,6 +607,88 @@ export const useErStore = create<ErStore>((set, get) => {
       else modelTables[tableLower] = { schema, deleted: false }
       patchTab(tabKey, { modelTables, dirty: true })
       rebuildGraph(tabKey)
+    },
+
+    runErDiff: async (tabKey) => {
+      const t = get().tabs[tabKey]
+      if (!t?.graph) throw new Error('ER 图尚未加载')
+      const serverNames = Object.fromEntries(
+        Object.entries(t.graph.tables).map(([k, v]) => [k, v.name]),
+      )
+      const payload = buildErDiffPayload(t.modelTables, serverNames)
+      if (payload.length === 0) return []
+      return withSessionReconnect(t.connectionId, () =>
+        api.erDiff(t.connectionId, t.database, payload),
+      )
+    },
+
+    refreshAfterApply: async (tabKey) => {
+      const t = get().tabs[tabKey]
+      if (!t) return []
+      const seq = t.requestSeq
+      const snapshot = await withSessionReconnect(t.connectionId, () =>
+        api.getErSnapshot(t.connectionId, t.database),
+      )
+      // 图以「新快照 + 现有 modelTables」重建（布局/折叠/走线等全部保留）
+      const graph = buildErGraph(snapshot, t.modelTables)
+      const inferredEdges = inferEdges(graph)
+      commit(tabKey, seq, { snapshot, graph, inferredEdges })
+
+      // 复跑 diff 决定清理范围
+      const cur = get().tabs[tabKey]
+      if (!cur) return []
+      const serverNames = Object.fromEntries(
+        Object.entries(cur.graph?.tables ?? {}).map(([k, v]) => [k, v.name]),
+      )
+      const payload = buildErDiffPayload(cur.modelTables, serverNames)
+      let remain: DiffItem[] = []
+      if (payload.length > 0) {
+        remain = await withSessionReconnect(cur.connectionId, () =>
+          api.erDiff(cur.connectionId, cur.database, payload),
+        )
+      }
+      // 有差异项的表保留条目；零差异/tombstone 已消失的清除
+      // （新建表可能已存在库里而 remain 为空 → 同样清除，角标消失）
+      const tablesWithDiff = new Set(remain.map((i) => i.table.toLowerCase()))
+      const modelTables: typeof cur.modelTables = {}
+      for (const [lower, mt] of Object.entries(cur.modelTables)) {
+        if (tablesWithDiff.has(lower)) modelTables[lower] = mt
+      }
+      // mfk → fk 走线/锚点迁移：仅迁移「复跑差异里已无对应 FK 项」的边
+      // （该 FK 已应用/收敛，真实 FK 边即将出现）；未应用的 FK 边保留 mfk 键，
+      // 否则用户没勾选的模型外键走线会丢
+      const pendingFkIds = new Set(
+        remain.filter((i) => i.kind === 'foreignKey').map((i) => i.id.toLowerCase()),
+      )
+      const edgeRoutes = { ...cur.edgeRoutes }
+      const edgeAnchors = { ...cur.edgeAnchors }
+      for (const key of Object.keys(edgeRoutes)) {
+        const m = key.match(/^mfk:(.+):(.+)$/)
+        if (!m) continue
+        const fkKey = `fk:${m[1]}:${m[2]}`
+        if (pendingFkIds.has(fkKey.toLowerCase())) continue
+        if (!(fkKey in edgeRoutes)) edgeRoutes[fkKey] = edgeRoutes[key]
+        delete edgeRoutes[key]
+      }
+      for (const key of Object.keys(edgeAnchors)) {
+        const m = key.match(/^mfk:(.+):(.+)$/)
+        if (!m) continue
+        const fkKey = `fk:${m[1]}:${m[2]}`
+        if (pendingFkIds.has(fkKey.toLowerCase())) continue
+        if (!(fkKey in edgeAnchors)) edgeAnchors[fkKey] = edgeAnchors[key]
+        delete edgeAnchors[key]
+      }
+      const graph2 = buildErGraph(snapshot, modelTables)
+      commit(tabKey, seq, {
+        modelTables,
+        graph: graph2,
+        inferredEdges: inferEdges(graph2),
+        edgeRoutes,
+        edgeAnchors,
+        dirty: true,
+      })
+      await get().save(tabKey) // 应用成功后的文档变化直接落盘，不留给用户手动保存
+      return remain
     },
 
     save: async (tabKey) => {

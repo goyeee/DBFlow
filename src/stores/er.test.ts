@@ -644,3 +644,89 @@ describe('ER store：v2 文档恢复与保存', () => {
     expect(doc.tables.every((t) => t.schema === undefined && t.status === undefined)).toBe(true)
   })
 })
+
+// ───────────────── 应用闭环（二期 A） ─────────────────
+
+import type { DiffItem } from '../api/types'
+
+function diffItem(over: Partial<DiffItem>): DiffItem {
+  return {
+    id: 'tbl:x', kind: 'table', action: 'create', table: 'x', name: 'x',
+    sourceDesc: null, targetDesc: null, sql: 'CREATE ...', sqlClause: null,
+    dangerous: false, sourceDdl: null, targetDdl: null,
+    ...over,
+  }
+}
+
+describe('ER store：应用闭环', () => {
+  it('runErDiff 组装 payload 并返回差异；无建模表返回空', async () => {
+    mockApi(snapWith(true), null)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    // 无建模表
+    let items = await useErStore.getState().runErDiff(KEY_A)
+    expect(items).toEqual([])
+    expect(api.erDiff).not.toHaveBeenCalled()
+    // 建表后：payload 只含新表，表名用服务器大小写
+    useErStore.getState().createTable(KEY_A)
+    ;(api.erDiff as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      diffItem({ id: 'tbl:new_table_1', table: 'new_table_1' }),
+    ])
+    items = await useErStore.getState().runErDiff(KEY_A)
+    const calls = (api.erDiff as ReturnType<typeof vi.fn>).mock.calls
+    expect(calls[calls.length - 1]![2]).toEqual([
+      { name: 'new_table_1', schema: expect.objectContaining({ name: 'new_table_1' }) },
+    ])
+    expect(items).toHaveLength(1)
+  })
+
+  it('refreshAfterApply：零差异表清条目；tombstone 移除；走线迁移；自动保存', async () => {
+    mockApi(snapWith(true), null)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    const store = useErStore.getState()
+    store.createTable(KEY_A) // new_table_1 → CREATE（应用成功 → 清除）
+    useErStore.getState().addModelFk(KEY_A, { table: 'user_roles', columns: ['usersID'], refTable: 'users', refColumns: ['usersID'] })
+    // 手拖走线挂在 mfk 边上
+    useErStore.getState().setEdgeRoute(KEY_A, 'mfk:user_roles:fk_user_roles_usersid', [{ x: 9, y: 9 }])
+    // 库快照刷新后与模型一致（模拟已应用）
+    ;(api.getErSnapshot as ReturnType<typeof vi.fn>).mockResolvedValueOnce(snapWith(true))
+    ;(api.erDiff as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]) // 复跑：全部零差异
+
+    const remain = await useErStore.getState().refreshAfterApply(KEY_A)
+    expect(remain).toEqual([])
+    const t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables).toEqual({}) // 零差异全部清除
+    expect(t.graph!.tables.new_table_1).toBeUndefined() // 新表已不在快照 → 消失
+    expect(t.dirty).toBe(false) // 已自动保存
+    expect(t.edgeRoutes['fk:user_roles:fk_user_roles_usersid']).toEqual([{ x: 9, y: 9 }])
+    expect(t.edgeRoutes['mfk:user_roles:fk_user_roles_usersid']).toBeUndefined()
+  })
+
+  it('refreshAfterApply：仍有差异的表保留条目（部分应用/失败场景）', async () => {
+    mockApi(snapWith(true), null)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    useErStore.getState().createTable(KEY_A)
+    ;(api.getErSnapshot as ReturnType<typeof vi.fn>).mockResolvedValueOnce(snapWith(true))
+    ;(api.erDiff as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      diffItem({ id: 'tbl:new_table_1', table: 'new_table_1' }), // 未应用（用户没勾）
+    ])
+    const remain = await useErStore.getState().refreshAfterApply(KEY_A)
+    expect(remain).toHaveLength(1)
+    const t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.new_table_1).toBeDefined() // 保留
+  })
+
+  it('refreshAfterApply：未应用的模型外键走线不迁移（mfk 键保留）', async () => {
+    mockApi(snapWith(true), null)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    useErStore.getState().addModelFk(KEY_A, { table: 'user_roles', columns: ['usersID'], refTable: 'users', refColumns: ['usersID'] })
+    useErStore.getState().setEdgeRoute(KEY_A, 'mfk:user_roles:fk_user_roles_usersid', [{ x: 3, y: 3 }])
+    ;(api.getErSnapshot as ReturnType<typeof vi.fn>).mockResolvedValueOnce(snapWith(true))
+    ;(api.erDiff as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      diffItem({ id: 'fk:user_roles:fk_user_roles_usersid', kind: 'foreignKey', action: 'modify', table: 'user_roles', name: 'fk_user_roles_usersid' }), // 用户没勾，未应用
+    ])
+    await useErStore.getState().refreshAfterApply(KEY_A)
+    const t = useErStore.getState().tabs[KEY_A]!
+    expect(t.edgeRoutes['mfk:user_roles:fk_user_roles_usersid']).toEqual([{ x: 3, y: 3 }])
+    expect(t.edgeRoutes['fk:user_roles:fk_user_roles_usersid']).toBeUndefined()
+  })
+})
