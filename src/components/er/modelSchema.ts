@@ -164,6 +164,10 @@ export function validateTableSchema(schema: ErTableSchema, existingOthers: Set<s
   for (const c of schema.columns) {
     if (!c.name.trim()) return '列名不能为空'
     if (!c.dataType.trim()) return `列「${c.name}」缺少类型`
+    if (c.extra.toLowerCase().includes('auto_increment') && !isIntegerType(c.dataType))
+      return `列「${c.name}」只有整数类型才能自增`
+    if (c.extra.toLowerCase().includes('on update current_timestamp') && !isTemporalType(c.dataType))
+      return `列「${c.name}」只有 timestamp/datetime 类型才能勾选更新时间`
     if (colNames.has(c.name.trim().toLowerCase())) return `存在重复列名「${c.name}」`
     colNames.add(c.name.trim().toLowerCase())
   }
@@ -314,6 +318,18 @@ export function schemaToColDraft(c: ErColumnSchema): ColDraftData {
   }
 }
 
+/** 整数族类型（auto_increment 只允许整数列；含 unsigned/显示宽度形态） */
+export function isIntegerType(dataType: string): boolean {
+  const base = dataType.trim().toLowerCase().split('(')[0].split(/\s+/)[0]
+  return ['tinyint', 'smallint', 'mediumint', 'int', 'integer', 'bigint'].includes(base)
+}
+
+/** 时间类型（ON UPDATE CURRENT_TIMESTAMP 只允许 timestamp/datetime 列） */
+export function isTemporalType(dataType: string): boolean {
+  const base = dataType.trim().toLowerCase().split('(')[0].split(/\s+/)[0]
+  return base === 'timestamp' || base === 'datetime'
+}
+
 /** 列改名传播：列名（忽略大小写）变化同步到索引列与外键列引用，
  *  否则改主键列名后索引仍指旧名，保存校验直接报「不存在的列」 */
 export interface ColumnRenameDraft {
@@ -327,6 +343,7 @@ export function applyColumnNameRename<T extends ColumnRenameDraft>(
   newName: string,
 ): T {
   const oldL = oldName.trim().toLowerCase()
+  if (!oldL) return draft // 空旧名不传播（否则会把所有空白列一起改名）；本行由调用方编辑
   const rep = (col: string) => (col.trim().toLowerCase() === oldL ? newName : col)
   return {
     ...draft,

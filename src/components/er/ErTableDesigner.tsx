@@ -21,7 +21,14 @@ import {
 import { api } from '../../api/commands'
 import { useErStore } from '../../stores/er'
 import { useErTab, useErTabKey } from './erTabContext'
-import { applyColumnNameRename, colDraftToSchema, schemaToColDraft, snapshotTableToSchema } from './modelSchema'
+import {
+  applyColumnNameRename,
+  colDraftToSchema,
+  isIntegerType,
+  isTemporalType,
+  schemaToColDraft,
+  snapshotTableToSchema,
+} from './modelSchema'
 import { SqlView } from '../compare/SqlView'
 import type { ErColumnSchema, ErFkSchema, ErIndexSchema, ErTableSchema } from '../../api/types'
 
@@ -269,8 +276,16 @@ export function ErTableDesigner() {
         placeholder="列名"
         value={c.name}
         onChange={(e) => {
-          // 改名传播到索引与外键的列引用（逐键触发，引用跟着走）
-          setDraft((d) => (d ? applyColumnNameRename(d, c.name, e.target.value) : d))
+          const v = e.target.value
+          setDraft((d) => {
+            if (!d) return d
+            if (c.name.trim() === '') {
+              // 空旧名不传播（否则连续新增的空白列会联动改名）
+              return { ...d, cols: d.cols.map((x) => (x.uid === c.uid ? { ...x, name: v } : x)) }
+            }
+            // 改名传播到索引与外键的列引用（逐键触发，引用跟着走）
+            return applyColumnNameRename(d, c.name, v)
+          })
         }}
       />
       <Input
@@ -310,18 +325,24 @@ export function ErTableDesigner() {
         value={c.default ?? ''}
         onChange={(e) => setCols((cs) => cs.map((x) => (x.uid === c.uid ? { ...x, default: e.target.value } : x)))}
       />
-      <Checkbox
-        checked={c.autoInc}
-        onChange={(e) => setCols((cs) => cs.map((x) => (x.uid === c.uid ? { ...x, autoInc: e.target.checked } : x)))}
-      >
-        自增
-      </Checkbox>
-      <Checkbox
-        checked={c.onUpdateTs}
-        onChange={(e) => setCols((cs) => cs.map((x) => (x.uid === c.uid ? { ...x, onUpdateTs: e.target.checked } : x)))}
-      >
-        更新时间
-      </Checkbox>
+      <Tooltip title={c.autoInc || isIntegerType(c.dataType) ? undefined : '只有整数类型才能自增'}>
+        <Checkbox
+          checked={c.autoInc}
+          disabled={!isIntegerType(c.dataType)}
+          onChange={(e) => setCols((cs) => cs.map((x) => (x.uid === c.uid ? { ...x, autoInc: e.target.checked } : x)))}
+        >
+          自增
+        </Checkbox>
+      </Tooltip>
+      <Tooltip title={c.onUpdateTs || isTemporalType(c.dataType) ? undefined : '只有 timestamp/datetime 类型才能勾选'}>
+        <Checkbox
+          checked={c.onUpdateTs}
+          disabled={!isTemporalType(c.dataType)}
+          onChange={(e) => setCols((cs) => cs.map((x) => (x.uid === c.uid ? { ...x, onUpdateTs: e.target.checked } : x)))}
+        >
+          更新时间
+        </Checkbox>
+      </Tooltip>
       <Input
         size="small"
         style={{ flex: 1 }}
@@ -342,7 +363,7 @@ export function ErTableDesigner() {
                   uid: nextUid(),
                   name: '',
                   dataType: '',
-                  nullable: true,
+                  nullable: false,
                   default: null,
                   autoInc: false,
                   onUpdateTs: false,
@@ -554,7 +575,7 @@ export function ErTableDesigner() {
                         uid: nextUid(),
                         name: '',
                         dataType: '',
-                        nullable: true,
+                        nullable: false,
                         default: null,
                         autoInc: false,
                         onUpdateTs: false,

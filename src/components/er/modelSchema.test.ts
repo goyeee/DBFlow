@@ -267,3 +267,53 @@ describe('applyColumnNameRename：列改名传播到索引与外键', () => {
     expect(d.fks[0].columns).toEqual(['CkslID'])
   })
 })
+
+// ───────────────── 验收反馈第二轮 ─────────────────
+
+import { applyColumnNameRename as renameFn, isIntegerType, isTemporalType } from './modelSchema'
+
+describe('applyColumnNameRename：空旧名不传播（多个空白列互不联动）', () => {
+  it('旧名为空时 no-op——连续新增的空白列填名互不影响', () => {
+    const d = {
+      cols: [
+        { uid: 'a', name: '' },
+        { uid: 'b', name: '' },
+      ],
+      idxs: [],
+      fks: [],
+    }
+    const r = renameFn(d, '', 'col_a')
+    expect(r).toEqual(d) // no-op，由调用方自行改本行
+  })
+})
+
+describe('类型谓词与列属性预校验', () => {
+  it('isIntegerType：整数族（含 unsigned/宽度）为真', () => {
+    expect(isIntegerType('int')).toBe(true)
+    expect(isIntegerType('BIGINT UNSIGNED')).toBe(true)
+    expect(isIntegerType('tinyint(1)')).toBe(true)
+    expect(isIntegerType('varchar(20)')).toBe(false)
+    expect(isIntegerType('')).toBe(false)
+    expect(isIntegerType('decimal(10,2)')).toBe(false)
+  })
+  it('isTemporalType：timestamp/datetime 为真', () => {
+    expect(isTemporalType('timestamp')).toBe(true)
+    expect(isTemporalType('DATETIME')).toBe(true)
+    expect(isTemporalType('date')).toBe(false)
+    expect(isTemporalType('int')).toBe(false)
+    expect(isTemporalType('')).toBe(false)
+  })
+  it('validateTableSchema：非整数列勾自增 / 非时间列勾更新时间 → 拒绝', () => {
+    const mk = (dataType: string, extra: string) =>
+      schema('t', {
+        columns: [
+          { name: 'id', dataType: 'bigint', nullable: false, default: null, extra: 'auto_increment', comment: null, characterSet: null, collation: null },
+          { name: 'x', dataType, nullable: true, default: null, extra, comment: null, characterSet: null, collation: null },
+        ],
+      })
+    expect(validateTableSchema(mk('varchar(20)', 'auto_increment'))).toContain('自增')
+    expect(validateTableSchema(mk('int', 'on update current_timestamp'))).toContain('更新时间')
+    // 合法组合通过
+    expect(validateTableSchema(mk('timestamp', 'on update current_timestamp'))).toBeNull()
+  })
+})
