@@ -162,7 +162,7 @@ function layoutGraph(
     id: t.name.toLowerCase(),
     ...estimateNodeSize(t.columns.length, !!collapsed[t.name.toLowerCase()]),
   }))
-  const edges = [...graph.fkEdges, ...extraEdges].map((e) => ({
+  const edges = [...graph.fkEdges, ...graph.mfkEdges, ...extraEdges].map((e) => ({
     source: e.sourceTable.toLowerCase(),
     target: e.targetTable.toLowerCase(),
   }))

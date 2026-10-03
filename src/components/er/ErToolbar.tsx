@@ -6,8 +6,10 @@ import {
   ExportOutlined,
   FileImageOutlined,
   LinkOutlined,
+  PlusOutlined,
   SaveOutlined,
   CodeOutlined,
+  ThunderboltOutlined,
 } from '@ant-design/icons'
 
 import { api } from '../../api/commands'
@@ -17,6 +19,7 @@ import { buildModelDoc } from './transform'
 import { erCanvasApi } from './erCanvasApi'
 import { askChoice } from './closeGuard'
 import { ErDdlModal } from './ErDdlModal'
+import { ErApplyModal } from './ErApplyModal'
 import { ErManualModal } from './ErManualModal'
 import { useErTab, useErTabKey } from './erTabContext'
 
@@ -29,9 +32,13 @@ export function ErToolbar() {
   const search = useErTab((t) => t.search)
   const inferredEdges = useErTab((t) => t.inferredEdges)
   const inferredStatus = useErTab((t) => t.inferredStatus)
+  const editMode = useErTab((t) => t.editMode)
+  const modelTables = useErTab((t) => t.modelTables)
   const [ddlOpen, setDdlOpen] = useState(false)
   const [ddlSql, setDdlSql] = useState('')
   const [manualOpen, setManualOpen] = useState(false)
+  const [applyOpen, setApplyOpen] = useState(false)
+  const modelCount = Object.keys(modelTables ?? {}).length
 
   const options = useMemo(() => {
     const q = search?.trim().toLowerCase()
@@ -198,6 +205,42 @@ export function ErToolbar() {
         <Input.Search placeholder="搜索表名 / 列名" allowClear size="small" />
       </AutoComplete>
       <Space size={4}>
+        <Tooltip title="进入编辑模式：新建表、修改结构、建立模型外键，并可应用回库">
+          <span className="er-toolbar-switch">
+            编辑{' '}
+            <Switch
+              size="small"
+              checked={editMode}
+              onChange={(v) => useErStore.getState().setEditMode(tabKey, v)}
+            />
+          </span>
+        </Tooltip>
+        {editMode && (
+          <>
+            <Tooltip title="在画布左侧新建表（预填 id 主键，可在设计器中修改）">
+              <Button
+                size="small"
+                icon={<PlusOutlined />}
+                onClick={() => useErStore.getState().createTable(tabKey)}
+              >
+                新建表
+              </Button>
+            </Tooltip>
+            <Tooltip title="把模型结构变更与数据库比对，生成 DDL 应用回库">
+              <Badge count={modelCount} size="small" offset={[-2, 2]}>
+                <Button
+                  size="small"
+                  type={modelCount > 0 ? 'primary' : 'default'}
+                  icon={<ThunderboltOutlined />}
+                  disabled={modelCount === 0}
+                  onClick={() => setApplyOpen(true)}
+                >
+                  应用变更
+                </Button>
+              </Badge>
+            </Tooltip>
+          </>
+        )}
         <Tooltip title="推断的关系（虚线）：点击连线可确认或忽略">
           <span className="er-toolbar-switch">
             推断{' '}
@@ -263,6 +306,7 @@ export function ErToolbar() {
         </Tooltip>
       </Space>
       <ErDdlModal open={ddlOpen} sql={ddlSql} onClose={() => setDdlOpen(false)} />
+      <ErApplyModal open={applyOpen} onClose={() => setApplyOpen(false)} />
       <ErManualModal open={manualOpen} onClose={() => setManualOpen(false)} />
     </div>
   )

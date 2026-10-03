@@ -1764,3 +1764,55 @@ textarea,
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+/* ───── ER 图上建模（二期 A）───── */
+/* 模型外键：实线青绿（区别于真实 FK 蓝、手动关联紫、推断虚线） */
+.er-edge-mfk .react-flow__edge-path { stroke: #13a8a8; stroke-width: 1.6px; }
+.er-edge-mfk.er-edge-selected .react-flow__edge-path { stroke: #0e8484; stroke-width: 2.4px; }
+
+/* 建模状态角标 */
+.er-model-badge {
+  display: inline-block; margin-right: 6px; padding: 0 5px; border-radius: 8px;
+  font-size: 11px; line-height: 16px; color: #fff; vertical-align: middle;
+}
+.er-model-badge-new { background: #52a86e; }
+.er-model-badge-edited { background: #d9822b; }
+.er-model-badge-deleted { background: #c04040; }
+
+/* 新建表虚线边框；tombstone 灰显 + 删除线 */
+.er-node-new .er-table-node { border: 1.5px dashed #52a86e; }
+.er-node-deleted .er-table-node { opacity: 0.55; background: #f5f5f5; }
+.er-node-deleted .er-table-name { text-decoration: line-through; }
+
+/* 表设计器 */
+.erd-head { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.erd-field { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #666; }
+.erd-rows { display: flex; flex-direction: column; gap: 6px; }
+.erd-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.erd-tag { font-size: 11px; color: #999; padding: 0 6px; }
+.erd-ddl-title { font-size: 12px; color: #666; margin: 10px 0 4px; }
+
+/* 应用变更弹窗 */
+.er-apply-body { display: flex; flex-direction: column; height: 560px; }
+.er-apply-top { flex: 1.4; overflow: auto; min-height: 200px; }
+.er-apply-bottom { flex: 1; min-height: 160px; }
+.er-apply-group { margin-bottom: 10px; }
+.er-apply-group-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.er-apply-table { font-weight: 600; }
+.er-apply-item { display: flex; align-items: center; gap: 8px; padding: 2px 4px 2px 24px; cursor: pointer; border-radius: 4px; }
+.er-apply-item:hover { background: #f5f5f5; }
+.er-apply-item.active { background: #e8f1fb; }
+.er-apply-action { width: 36px; font-size: 12px; color: #1677ff; }
+.er-apply-action.danger { color: #d94040; }
+.er-apply-desc { font-size: 12px; }
+.er-apply-desc.dim { color: #999; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.er-apply-danger { font-size: 11px; color: #d94040; border: 1px solid #d94040; border-radius: 8px; padding: 0 5px; }
+.er-apply-ddl { display: flex; gap: 8px; height: 100%; }
+.er-apply-ddl > div { flex: 1; overflow: auto; }
+.er-apply-ddl-title { font-size: 12px; color: #666; margin-bottom: 4px; }
+
+/* 模型外键弹框 */
+.er-fk-form { display: flex; flex-direction: column; gap: 10px; }
+.er-fk-form label { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.er-fk-line { font-size: 13px; }
+.er-fk-hint { font-size: 12px; color: #999; }

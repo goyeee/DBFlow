@@ -34,6 +34,7 @@ import { collectNodeMarks, type MarkKind, type NodeMark } from './highlight'
 import { erCanvasApi } from './erCanvasApi'
 import { askChoice } from './closeGuard'
 import { useErTab, useErTabKey } from './erTabContext'
+import { ErFkModal } from './ErFkModal'
 import type { ErEdgeInfo } from './transform'
 
 const nodeTypes = { erTable: TableNode }
@@ -73,14 +74,21 @@ function buildNodes(
           .map((c) => c.name.toLowerCase())
       : []
     const mark = marks.get(id)
+    const modelCls =
+      t.modelStatus === 'new'
+        ? 'er-node-new'
+        : t.modelStatus === 'deleted'
+          ? 'er-node-deleted'
+          : undefined
     return {
       id,
       type: 'erTable' as const,
       // 关系高亮的节点级 class 挂在 RF wrapper 上（CSS：.er-node-{kind} .er-table-node）。
       // 声明式输出——画布开着虚拟化，视口外/滚动重挂载的节点不会丢高亮
-      className: mark?.node.length
-        ? mark.node.map((k) => `er-node-${k}`).join(' ')
-        : undefined,
+      className:
+        [mark?.node.length ? mark.node.map((k) => `er-node-${k}`).join(' ') : undefined, modelCls]
+          .filter(Boolean)
+          .join(' ') || undefined,
       position: positions[id] ?? { x: 0, y: 0 },
       // 关掉 RF 的「单击单选替换」（节点级覆盖，Shift 框选不受影响）：
       // 表头单击走自己的追加式选中（联动高亮/方向键微移）
@@ -89,6 +97,7 @@ function buildNodes(
       data: {
         table: t,
         collapsed: !!collapsed[id],
+        modelStatus: t.modelStatus,
         highlight: match || id === selectedTable,
         matchedColumns: matchedColumns.length > 0 ? matchedColumns : undefined,
         anchors: anchors.get(id) ?? [],
@@ -100,10 +109,11 @@ function buildNodes(
   })
 }
 
-/** 边：真实 FK 实线蓝；手动关联实线紫；推断边虚线（确认后仍虚线、忽略后隐藏）。
+/** 边：真实 FK 实线蓝；模型外键实线青绿（未应用）；手动关联实线紫；推断边虚线（确认后仍虚线、忽略后隐藏）。
  *  via 为手拖途经点（自定义边组件据此切换折线走线） */
 function buildEdges(
   fkEdges: ErEdgeInfo[],
+  mfkEdges: ErEdgeInfo[],
   inferredEdges: ErEdgeInfo[],
   manualEdges: ErEdgeInfo[],
   inferredStatus: Record<string, 'confirmed' | 'ignored'>,
@@ -122,13 +132,14 @@ function buildEdges(
     data: { info: e, via: edgeRoutes[e.id] },
   })
   const fk = fkEdges.map((e) => toEdge(e, 'er-edge-fk'))
+  const mfk = mfkEdges.map((e) => toEdge(e, 'er-edge-mfk'))
   const manual = manualEdges.map((e) => toEdge(e, 'er-edge-manual'))
   const inferred = inferredEdges
     .filter((e) => showInferred && inferredStatus[e.id] !== 'ignored')
     .map((e) =>
       toEdge(e, inferredStatus[e.id] === 'confirmed' ? 'er-edge-inferred-ok' : 'er-edge-inferred'),
     )
-  return [...fk, ...manual, ...inferred]
+  return [...fk, ...mfk, ...manual, ...inferred]
 }
 
 /** 边提示框的文本行：FK 名 / 手动标记 / 列映射 / ON 规则 */
@@ -136,6 +147,7 @@ function edgeTipLines(info: ErEdgeInfo): string[] {
   const lines: string[] = []
   if (info.fkName) lines.push(info.fkName)
   if (info.kind === 'manual') lines.push('手动关联')
+  if (info.kind === 'mfk') lines.push('模型外键（未应用）')
   info.sourceColumns.forEach((c, i) => {
     lines.push(`${info.sourceTable}.${c} → ${info.targetTable}.${info.targetColumns[i]}`)
   })
@@ -173,6 +185,13 @@ export function ErCanvas() {
   const [edgeTip, setEdgeTip] = useState<{ x: number; y: number; lines: string[] } | null>(null)
   // 左键单击选中的连线（高亮）；信息/裁决等操作在右键弹框
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
+  // 编辑态拖线建模型外键的待确认输入（ErFkModal 打开中）
+  const [fkPending, setFkPending] = useState<{
+    sourceTable: string
+    sourceColumn: string
+    targetTable: string
+    targetColumn: string
+  } | null>(null)
   // 悬停中的连线（hover 高亮）：与选中各自独立，一起进声明式 marks
   const [hoverEdgeId, setHoverEdgeId] = useState<string | null>(null)
   // 选中表集合（追加单击/框选）：联动点亮它参与的关系线与两端表/列
@@ -234,6 +253,7 @@ export function ErCanvas() {
       }
     const built = buildEdges(
       graph.fkEdges,
+      graph.mfkEdges,
       inferredEdges ?? [],
       manualEdges ?? [],
       inferredStatus ?? {},
@@ -595,9 +615,15 @@ export function ErCanvas() {
     useErStore.getState().setSelectedTable(tabKey, null)
   }
 
-  /** 双击节点：打开详情抽屉 */
+  /** 双击节点：编辑态开表设计器（tombstone 不可编辑）；浏览态开详情抽屉 */
   const onNodeDoubleClick = (_: unknown, node: Node) => {
-    useErStore.getState().setDrawerTable(tabKey, node.id)
+    const t = useErStore.getState().tabs[tabKey]
+    if (t?.editMode) {
+      if (t.modelTables[node.id]?.deleted) return
+      useErStore.getState().setDesignerTable(tabKey, node.id)
+    } else {
+      useErStore.getState().setDrawerTable(tabKey, node.id)
+    }
   }
 
   /** 拖动表时的智能对齐引导（画图软件式 smart guides）：被拖表的左/中/右缘
@@ -711,11 +737,23 @@ export function ErCanvas() {
     useErStore.getState().moveTable(tabKey, node.id, node.position.x, node.position.y)
   }
 
-  /** 拖拽两列拉线：确认后添加手动关联（方向自动规范化为主键端被引用；仅入本地模型文档） */
+  /** 拖拽两列拉线：编辑态建「模型外键」（弹框确认约束名/ON 规则，回库生成 DDL）；
+   *  浏览态确认后添加手动关联（方向自动规范化为主键端被引用；仅入本地模型文档） */
   const onConnect = async (conn: Connection) => {
     if (!conn.source || !conn.target || !conn.sourceHandle || !conn.targetHandle) return
-    const g = useErStore.getState().tabs[tabKey]?.graph
+    const tab = useErStore.getState().tabs[tabKey]
+    const g = tab?.graph
     if (!g) return
+    if (tab?.editMode) {
+      // 编辑态：拖拽源 = 子表列，目标 = 被引用表列
+      setFkPending({
+        sourceTable: g.tables[conn.source]?.name ?? conn.source,
+        sourceColumn: conn.sourceHandle,
+        targetTable: g.tables[conn.target]?.name ?? conn.target,
+        targetColumn: conn.targetHandle,
+      })
+      return
+    }
     // 节点 id 是小写表名，展示用真实表名
     const srcName = g.tables[conn.source]?.name ?? conn.source
     const tgtName = g.tables[conn.target]?.name ?? conn.target
@@ -744,8 +782,40 @@ export function ErCanvas() {
     if (!r.ok) message.warning(r.error ?? '无法添加关联')
   }
 
-  /** 画布/节点右键不弹操作菜单（按需求去掉）；仅阻止 webview 默认菜单 */
+  /** 画布右键不弹菜单；节点右键在编辑态弹「编辑结构/删除表/恢复」操作框 */
   const suppressContextMenu = (e: React.MouseEvent | MouseEvent) => e.preventDefault()
+
+  const onNodeContextMenu = (e: React.MouseEvent, node: Node) => {
+    e.preventDefault()
+    const t = useErStore.getState().tabs[tabKey]
+    if (!t?.editMode || !t.graph) return
+    const lower = node.id
+    const tombstone = !!t.modelTables[lower]?.deleted
+    void (async () => {
+      const answer = await askChoice<'design' | 'del' | 'restore'>({
+        title: `表 · ${t.graph!.tables[lower]?.name ?? lower}`,
+        content: tombstone
+          ? '该表已标记删除（未应用）。'
+          : '编辑结构或标记删除（应用变更时才修改数据库）。',
+        choices: [
+          ...(tombstone
+            ? [{ value: 'restore' as const, label: '恢复表', primary: true }]
+            : [
+                { value: 'design' as const, label: '编辑结构', primary: true },
+                { value: 'del' as const, label: '删除表', danger: true },
+              ]),
+          { value: null, label: '关闭' },
+        ],
+      })
+      const store = useErStore.getState()
+      if (answer === 'design') store.setDesignerTable(tabKey, lower)
+      else if (answer === 'restore') store.restoreTable(tabKey, lower)
+      else if (answer === 'del') {
+        const r = store.deleteTable(tabKey, lower)
+        if (!r.ok) message.warning(r.error ?? '无法删除')
+      }
+    })()
+  }
 
   // 关系高亮（悬停边/选中边/选中表联动/点字段点亮）全部走上面的声明式 marks：
   // 节点 class 进 node.className、列 class 进 data.markCols，由 TableNode 渲染
@@ -821,6 +891,22 @@ export function ErCanvas() {
       return
     }
 
+    if (info.kind === 'mfk') {
+      const answer = await askChoice<'remove' | 'resetRoute'>({
+        title: `模型外键 · ${info.fkName ?? ''}`,
+        content: infoContent('建模添加的外键，尚未应用到数据库；应用变更时生成 ADD FOREIGN KEY。'),
+        choices: [
+          { value: 'remove', label: '删除模型外键', danger: true },
+          ...(canReset ? [resetRouteChoice] : []),
+          closeChoice,
+        ],
+      })
+      if (answer === 'remove')
+        store.removeModelFk(tabKey, info.sourceTable.toLowerCase(), info.fkName ?? '')
+      else if (answer === 'resetRoute') resetRoute()
+      return
+    }
+
     if (info.kind === 'manual') {
       const answer = await askChoice<'remove' | 'resetRoute'>({
         title: '手动关联',
@@ -886,7 +972,7 @@ export function ErCanvas() {
         onNodeDoubleClick={onNodeDoubleClick}
         onPaneClick={onPaneClick}
         onPaneContextMenu={suppressContextMenu}
-        onNodeContextMenu={suppressContextMenu}
+        onNodeContextMenu={onNodeContextMenu}
         onEdgeClick={onEdgeClick}
         onEdgeContextMenu={onEdgeContextMenu}
         onEdgeMouseEnter={onEdgeMouseEnter}
@@ -937,6 +1023,7 @@ export function ErCanvas() {
           )}
         </div>
       )}
+      <ErFkModal open={!!fkPending} pending={fkPending} onClose={() => setFkPending(null)} />
       {edgeTip && (
         <div className="er-edge-tip" style={{ left: edgeTip.x + 12, top: edgeTip.y + 12 }}>
           {edgeTip.lines.map((l) => (

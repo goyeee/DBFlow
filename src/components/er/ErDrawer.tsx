@@ -1,4 +1,4 @@
-import { Drawer, Descriptions, Popconfirm, Table, Tag } from 'antd'
+import { Alert, Button, Drawer, Descriptions, Popconfirm, Table, Tag } from 'antd'
 
 import { useErStore } from '../../stores/er'
 import { erCanvasApi } from './erCanvasApi'
@@ -75,6 +75,9 @@ export function ErDrawer() {
   const inferredEdges = useErTab((t) => t.inferredEdges)
   const manualEdges = useErTab((t) => t.manualEdges)
   const inferredStatus = useErTab((t) => t.inferredStatus)
+  const editMode = useErTab((t) => t.editMode)
+  const modelTables = useErTab((t) => t.modelTables)
+  const tombstoned = drawerTable ? !!modelTables?.[drawerTable]?.deleted : false
 
   const table: ErTable | undefined = drawerTable ? graph?.tables[drawerTable] : undefined
   const lower = drawerTable
@@ -112,9 +115,30 @@ export function ErDrawer() {
       width={560}
       open={!!table}
       onClose={() => useErStore.getState().setDrawerTable(tabKey, null)}
+      extra={
+        editMode && table && !tombstoned ? (
+          <Button
+            size="small"
+            onClick={() => {
+              useErStore.getState().setDesignerTable(tabKey, drawerTable!)
+              useErStore.getState().setDrawerTable(tabKey, null)
+            }}
+          >
+            编辑结构
+          </Button>
+        ) : undefined
+      }
     >
       {table && (
         <>
+          {tombstoned && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message="该表已标记删除（未应用）——在画布右键可恢复"
+            />
+          )}
           {table.comment && (
             <Descriptions size="small" column={1} style={{ marginBottom: 12 }}>
               <Descriptions.Item label="注释">{table.comment}</Descriptions.Item>
