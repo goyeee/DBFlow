@@ -11,12 +11,13 @@ import { SqlView } from '../compare/SqlView'
 
 type Step = 'diff' | 'done'
 
-const ACTION_TEXT: Record<string, string> = {
-  create: '新建',
-  drop: '删除',
-  modify: '修改',
-  rename: '改名',
-  noop: '无操作',
+/** 差异操作文案按对象类型细化：对已有表加列是「加列」，不是「新建」 */
+const ACTION_TEXT: Record<string, Record<string, string>> = {
+  table: { create: '新建表', drop: '删表', modify: '改表', rename: '改名', noop: '无操作' },
+  column: { create: '加列', drop: '删列', modify: '改列', noop: '无操作' },
+  index: { create: '加索引', drop: '删索引', modify: '改索引', noop: '无操作' },
+  foreignKey: { create: '加外键', drop: '删外键', modify: '改外键', noop: '无操作' },
+  view: { create: '建视图', drop: '删视图', modify: '改视图', noop: '无操作' },
 }
 
 /** 应用变更：差异确认（按表分组勾选，dangerous 默认不勾）→ 部署执行 → 完成态。
@@ -176,7 +177,7 @@ export function ErApplyModal({ open, onClose }: { open: boolean; onClose: () => 
                       onClick={(e) => e.stopPropagation()}
                     />
                     <span className={`er-apply-action ${i.dangerous ? 'danger' : ''}`}>
-                      {ACTION_TEXT[i.action] ?? i.action}
+                      {ACTION_TEXT[i.kind]?.[i.action] ?? i.action}
                     </span>
                     <span className="er-apply-desc">{i.name}</span>
                     <span className="er-apply-desc dim">
@@ -287,6 +288,17 @@ export function ErApplyModal({ open, onClose }: { open: boolean; onClose: () => 
               showIcon
               message={`执行完成：成功 ${results.filter((r) => r.ok).length} 条，失败 ${results.filter((r) => !r.ok).length} 条（DDL 不可回滚，结果以数据库为准）`}
             />
+            {results.some((r) => !r.ok) && (
+              <div style={{ marginTop: 8 }}>
+                {results
+                  .filter((r) => !r.ok)
+                  .map((r, i) => (
+                    <div key={i} className="er-apply-error">
+                      失败：{r.sql.slice(0, 80)}… — {r.error}
+                    </div>
+                  ))}
+              </div>
+            )}
             <div style={{ marginTop: 8 }}>
               <SqlView
                 sql={

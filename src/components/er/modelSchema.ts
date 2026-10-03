@@ -255,21 +255,41 @@ export interface ColDraftData {
   nullable: boolean
   default: string | null
   autoInc: boolean
+  /** ON UPDATE CURRENT_TIMESTAMP（时间列自动更新时间） */
+  onUpdateTs: boolean
   comment: string
-  /** 除 auto_increment 外的 extra 原样保留（如 on update current_timestamp） */
+  /** 其余 extra 原样保留 */
   extraRest: string
   characterSet: string | null
   collation: string | null
 }
 
-/** 草稿 → 列 schema（autoInc 与 extraRest 合成 extra） */
+const ON_UPDATE_TS = 'on update current_timestamp'
+
+/** 草稿 → 列 schema。类型输入里硬写的 on update / default current_timestamp
+ *  会被剥到正确字段——留在 dataType 里会生成非法列序 DDL（on update 出现在 NULL 前） */
 export function colDraftToSchema(c: ColDraftData): ErColumnSchema {
-  const extra = [c.extraRest.trim(), c.autoInc ? 'auto_increment' : ''].filter(Boolean).join(' ')
+  let dataType = c.dataType.trim()
+  let extra = [c.extraRest.trim(), c.autoInc ? 'auto_increment' : '', c.onUpdateTs ? ON_UPDATE_TS : '']
+    .filter(Boolean)
+    .join(' ')
+  let def = c.default === '' ? '' : c.default
+  // 剥离硬写在类型里的常见关键字（大小写不敏感）
+  const strip = /\s+on\s+update\s+current_timestamp/gi
+  if (strip.test(dataType)) {
+    dataType = dataType.replace(strip, '').trim()
+    extra = [extra, ON_UPDATE_TS].filter(Boolean).join(' ')
+  }
+  const stripDef = /\s+default\s+current_timestamp/gi
+  if (stripDef.test(dataType)) {
+    dataType = dataType.replace(stripDef, '').trim()
+    if (def == null) def = 'current_timestamp'
+  }
   return {
     name: c.name.trim(),
-    dataType: c.dataType.trim(),
+    dataType,
     nullable: c.nullable,
-    default: c.default === '' ? '' : c.default,
+    default: def,
     extra,
     comment: c.comment === '' ? null : c.comment,
     characterSet: c.characterSet,
@@ -277,19 +297,42 @@ export function colDraftToSchema(c: ColDraftData): ErColumnSchema {
   }
 }
 
-/** 列 schema → 草稿（extra 拆出 auto_increment；default 三态保持） */
+/** 列 schema → 草稿（extra 拆出 auto_increment/on update；default 三态保持） */
 export function schemaToColDraft(c: ErColumnSchema): ColDraftData {
-  const hasAi = (c.extra ?? '').toLowerCase().includes('auto_increment')
+  const extra = (c.extra ?? '').replace(/on\s+update\s+current_timestamp/gi, ' ')
   return {
     name: c.name,
     dataType: c.dataType,
     nullable: c.nullable,
     default: c.default,
-    autoInc: hasAi,
+    autoInc: (c.extra ?? '').toLowerCase().includes('auto_increment'),
+    onUpdateTs: (c.extra ?? '').toLowerCase().includes('on update current_timestamp'),
     comment: c.comment ?? '',
-    extraRest: (c.extra ?? '').split(/\s+/).filter((t) => t.toLowerCase() !== 'auto_increment').join(' '),
+    extraRest: extra.split(/\s+/).filter((t) => t.toLowerCase() !== 'auto_increment').join(' ').trim(),
     characterSet: c.characterSet,
     collation: c.collation,
+  }
+}
+
+/** 列改名传播：列名（忽略大小写）变化同步到索引列与外键列引用，
+ *  否则改主键列名后索引仍指旧名，保存校验直接报「不存在的列」 */
+export interface ColumnRenameDraft {
+  cols: { uid: string; name: string }[]
+  idxs: { uid: string; name: string; columns: string[] }[]
+  fks: { uid: string; name: string; columns: string[] }[]
+}
+export function applyColumnNameRename<T extends ColumnRenameDraft>(
+  draft: T,
+  oldName: string,
+  newName: string,
+): T {
+  const oldL = oldName.trim().toLowerCase()
+  const rep = (col: string) => (col.trim().toLowerCase() === oldL ? newName : col)
+  return {
+    ...draft,
+    cols: draft.cols.map((c) => ({ ...c, name: rep(c.name) })),
+    idxs: draft.idxs.map((i) => ({ ...i, columns: i.columns.map(rep) })),
+    fks: draft.fks.map((f) => ({ ...f, columns: f.columns.map(rep) })),
   }
 }
 

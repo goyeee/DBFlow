@@ -221,7 +221,10 @@ export function ErToolbar() {
               <Button
                 size="small"
                 icon={<PlusOutlined />}
-                onClick={() => useErStore.getState().createTable(tabKey)}
+                onClick={() => {
+                  const lower = useErStore.getState().createTable(tabKey)
+                  if (lower) erCanvasApi.focusTable?.(lower)
+                }}
               >
                 新建表
               </Button>

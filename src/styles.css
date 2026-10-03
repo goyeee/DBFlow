@@ -1816,3 +1816,4 @@ textarea,
 .er-fk-form label { display: flex; align-items: center; gap: 10px; font-size: 13px; }
 .er-fk-line { font-size: 13px; }
 .er-fk-hint { font-size: 12px; color: #999; }
+.er-apply-error { font-size: 12px; color: #d94040; margin-top: 4px; word-break: break-all; }

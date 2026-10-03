@@ -165,7 +165,7 @@ describe('buildErDiffPayload', () => {
 
 // ───────────────── 评审修复：设计器列草稿三态默认值 / FK 拖线方向 ─────────────────
 
-import { colDraftToSchema, normalizeFkDirection, schemaToColDraft } from './modelSchema'
+import { applyColumnNameRename, colDraftToSchema, normalizeFkDirection, schemaToColDraft } from './modelSchema'
 import type { ErGraph } from './transform'
 
   describe("设计器列草稿：默认值三态（无默认 ≠ DEFAULT '')", () => {
@@ -206,5 +206,64 @@ describe('normalizeFkDirection：主键端作为被引用方（与手动关联�
     expect(normalizeFkDirection(graph, normal)).toEqual(normal)
     const none = { sourceTable: 'orders', sourceColumn: 'a', targetTable: 'users', targetColumn: 'b' }
     expect(normalizeFkDirection(graph, none)).toEqual(none)
+  })
+})
+
+// ───────────────── 用户验收反馈修复 ─────────────────
+
+describe('列草稿 ON UPDATE current_timestamp 显式支持与类型输入剥离', () => {
+  it('onUpdateTs 草稿标记 → extra 组装；schema extra → 草稿拆出', () => {
+    const d = schemaToColDraft({ name: 't', dataType: 'timestamp', nullable: false, default: null, extra: 'on update current_timestamp', comment: null, characterSet: null, collation: null })
+    expect(d.onUpdateTs).toBe(true)
+    const back = colDraftToSchema({ ...d, onUpdateTs: false })
+    expect(back.extra).toBe('')
+    const on = colDraftToSchema(d)
+    expect(on.extra).toBe('on update current_timestamp')
+  })
+  it('类型里硬写的 on update / default current_timestamp 被剥离到正确字段（不再产生非法列序 DDL）', () => {
+    const d = schemaToColDraft({ name: 't', dataType: 'timestamp', nullable: false, default: null, extra: '', comment: null, characterSet: null, collation: null })
+    const c = colDraftToSchema({
+      ...d,
+      dataType: 'DATETIME ON UPDATE CURRENT_TIMESTAMP',
+      default: null,
+    })
+    expect(c.dataType).toBe('DATETIME')
+    expect(c.extra).toBe('on update current_timestamp')
+    const c2 = colDraftToSchema({
+      ...d,
+      dataType: 'datetime default current_timestamp',
+      default: null,
+    })
+    expect(c2.dataType).toBe('datetime')
+    expect(c2.default).toBe('current_timestamp')
+    expect(c2.extra).toBe('')
+  })
+})
+
+describe('applyColumnNameRename：列改名传播到索引与外键', () => {
+  const draft = () => ({
+    cols: [
+      { uid: 'a', name: 'CkslID', dataType: 'bigint', nullable: false, default: null, autoInc: true, comment: '', extraRest: '', onUpdateTs: false, characterSet: null, collation: null },
+      { uid: 'b', name: 'Name', dataType: 'varchar(20)', nullable: true, default: null, autoInc: false, comment: '', extraRest: '', onUpdateTs: false, characterSet: null, collation: null },
+    ],
+    idxs: [
+      { uid: 'i', name: 'PRIMARY', columns: ['CkslID'], unique: true, indexType: 'BTREE', isPrimary: true, subParts: [], directions: [] },
+      { uid: 'j', name: 'idx_name', columns: ['CkslID', 'Name'], unique: false, indexType: 'BTREE', isPrimary: false, subParts: [], directions: [] },
+    ],
+    fks: [
+      { uid: 'f', name: 'fk1', columns: ['CkslID'], refTable: 'users', refColumns: ['id'], onDelete: null, onUpdate: null },
+    ],
+  })
+  it('改名同步所有索引与外键引用（忽略大小写）', () => {
+    const d = applyColumnNameRename(draft(), 'ckslid', 'ID')
+    expect(d.idxs[0].columns).toEqual(['ID'])
+    expect(d.idxs[1].columns).toEqual(['ID', 'Name'])
+    expect(d.fks[0].columns).toEqual(['ID'])
+    expect(d.cols[0].name).toBe('ID')
+  })
+  it('无关列名不受影响', () => {
+    const d = applyColumnNameRename(draft(), 'Name', 'DisplayName')
+    expect(d.idxs[1].columns).toEqual(['CkslID', 'DisplayName'])
+    expect(d.fks[0].columns).toEqual(['CkslID'])
   })
 })

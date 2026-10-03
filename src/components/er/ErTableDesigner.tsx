@@ -8,6 +8,7 @@ import {
   Select,
   Space,
   Tabs,
+  Tooltip,
   message,
 } from 'antd'
 import {
@@ -20,7 +21,7 @@ import {
 import { api } from '../../api/commands'
 import { useErStore } from '../../stores/er'
 import { useErTab, useErTabKey } from './erTabContext'
-import { colDraftToSchema, schemaToColDraft, snapshotTableToSchema } from './modelSchema'
+import { applyColumnNameRename, colDraftToSchema, schemaToColDraft, snapshotTableToSchema } from './modelSchema'
 import { SqlView } from '../compare/SqlView'
 import type { ErColumnSchema, ErFkSchema, ErIndexSchema, ErTableSchema } from '../../api/types'
 
@@ -36,6 +37,8 @@ interface ColDraft {
   /** 三态：null=无默认，''=DEFAULT ''，其余为字面值（库侧语义区分二者） */
   default: string | null
   autoInc: boolean
+  /** ON UPDATE CURRENT_TIMESTAMP（时间列自动更新） */
+  onUpdateTs: boolean
   comment: string
   extraRest: string // 除 auto_increment 外的 extra 原样保留（如 on update current_timestamp）
   /** 列级字符集/排序规则：设计器不提供编辑 UI，但必须透传——
@@ -265,7 +268,10 @@ export function ErTableDesigner() {
         style={{ width: 140 }}
         placeholder="列名"
         value={c.name}
-        onChange={(e) => setCols((cs) => cs.map((x) => (x.uid === c.uid ? { ...x, name: e.target.value } : x)))}
+        onChange={(e) => {
+          // 改名传播到索引与外键的列引用（逐键触发，引用跟着走）
+          setDraft((d) => (d ? applyColumnNameRename(d, c.name, e.target.value) : d))
+        }}
       />
       <Input
         size="small"
@@ -310,6 +316,12 @@ export function ErTableDesigner() {
       >
         自增
       </Checkbox>
+      <Checkbox
+        checked={c.onUpdateTs}
+        onChange={(e) => setCols((cs) => cs.map((x) => (x.uid === c.uid ? { ...x, onUpdateTs: e.target.checked } : x)))}
+      >
+        更新时间
+      </Checkbox>
       <Input
         size="small"
         style={{ flex: 1 }}
@@ -318,6 +330,32 @@ export function ErTableDesigner() {
         onChange={(e) => setCols((cs) => cs.map((x) => (x.uid === c.uid ? { ...x, comment: e.target.value } : x)))}
       />
       <Space size={2}>
+        <Tooltip title="在此行下方插入新列">
+          <Button
+            size="small"
+            type="text"
+            icon={<PlusOutlined />}
+            onClick={() =>
+              setCols((cs) => {
+                const next = [...cs]
+                next.splice(i + 1, 0, {
+                  uid: nextUid(),
+                  name: '',
+                  dataType: '',
+                  nullable: true,
+                  default: null,
+                  autoInc: false,
+                  onUpdateTs: false,
+                  comment: '',
+                  extraRest: '',
+                  characterSet: null,
+                  collation: null,
+                })
+                return next
+              })
+            }
+          />
+        </Tooltip>
         <Button size="small" type="text" icon={<ArrowUpOutlined />} disabled={i === 0} onClick={() => moveCol(i, -1)} />
         <Button
           size="small"
@@ -471,7 +509,7 @@ export function ErTableDesigner() {
           取消
         </Button>,
         <Button key="s" type="primary" loading={saving} onClick={save}>
-          保存到模型
+          保存
         </Button>,
       ]}
     >
@@ -519,6 +557,7 @@ export function ErTableDesigner() {
                         nullable: true,
                         default: null,
                         autoInc: false,
+                        onUpdateTs: false,
                         comment: '',
                         extraRest: '',
                         characterSet: null,
