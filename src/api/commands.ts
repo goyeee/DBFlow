@@ -16,7 +16,9 @@ import type {
   ConnectResult,
   DatabaseBrief,
   ErModelDoc,
+  ErModelTableInput,
   ErSnapshot,
+  ErTableSchema,
   NavicatCandidate,
   NavicatImportResult,
   NavicatImportSelection,
@@ -184,4 +186,8 @@ export const api = {
     invoke<void>('export_er_image', { path, dataUrl }),
   exportTablesDdl: (connectionId: string, database: string, tables: string[]) =>
     invoke<string>('export_tables_ddl', { connectionId, database, tables }),
+  erDiff: (connectionId: string, database: string, model: ErModelTableInput[]) =>
+    invoke<DiffItem[]>('er_diff', { connectionId, database, model }),
+  previewTableDdl: (database: string, schema: ErTableSchema) =>
+    invoke<string>('preview_table_ddl', { database, schema }),
 }
