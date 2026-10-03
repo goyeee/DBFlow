@@ -318,6 +318,15 @@ export function schemaToColDraft(c: ErColumnSchema): ColDraftData {
   }
 }
 
+/** 索引名推荐：idx_/uk_ 前缀 + 列名串联（MySQL 标识符上限 64 截断）。
+ *  空列集返回空串；表名不进名（列名通常已含语义，防超长） */
+export function recommendIndexName(_table: string, columns: string[], unique: boolean): string {
+  const cols = columns.filter(Boolean)
+  if (cols.length === 0) return ''
+  const name = `${unique ? 'uk' : 'idx'}_${cols.join('_')}`
+  return name.length > 64 ? name.slice(0, 64) : name
+}
+
 /** 整数族类型（auto_increment 只允许整数列；含 unsigned/显示宽度形态） */
 export function isIntegerType(dataType: string): boolean {
   const base = dataType.trim().toLowerCase().split('(')[0].split(/\s+/)[0]

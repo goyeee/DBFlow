@@ -317,3 +317,21 @@ describe('类型谓词与列属性预校验', () => {
     expect(validateTableSchema(mk('timestamp', 'on update current_timestamp'))).toBeNull()
   })
 })
+
+// ───────────────── 验收反馈第三轮：索引名自动推荐 ─────────────────
+
+import { recommendIndexName } from './modelSchema'
+
+describe('recommendIndexName', () => {
+  it('普通索引 idx_列们；唯一索引 uk_ 前缀', () => {
+    expect(recommendIndexName('orders', ['user_id'], false)).toBe('idx_user_id')
+    expect(recommendIndexName('orders', ['user_id', 'created_at'], false)).toBe('idx_user_id_created_at')
+    expect(recommendIndexName('orders', ['phone'], true)).toBe('uk_phone')
+  })
+  it('空列集返回空串（不生成名字）；超长截断到 64 字符', () => {
+    expect(recommendIndexName('t', [], false)).toBe('')
+    const long = recommendIndexName('t', ['a_very_long_column_name_number_one', 'a_very_long_column_name_number_two', 'a_very_long_column_name_three'], false)
+    expect(long.length).toBeLessThanOrEqual(64)
+    expect(long.startsWith('idx_')).toBe(true)
+  })
+})

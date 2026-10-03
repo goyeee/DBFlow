@@ -24,6 +24,7 @@ import { useErTab, useErTabKey } from './erTabContext'
 import {
   applyColumnNameRename,
   colDraftToSchema,
+  recommendIndexName,
   isIntegerType,
   isTemporalType,
   schemaToColDraft,
@@ -396,28 +397,42 @@ export function ErTableDesigner() {
     </div>
   ))
 
+  /** 索引名跟随列集（用户未手改时）：旧名是旧列集的推荐名（或空）→ 换成新推荐名 */
+  const followIndexName = (
+    x: IdxDraft,
+    patch: Partial<IdxDraft>,
+    tableName: string,
+  ): IdxDraft => {
+    if (x.isPrimary) return { ...x, ...patch }
+    const cols = patch.columns ?? x.columns
+    const unique = patch.unique ?? x.unique
+    const wasRecommended =
+      x.name === '' || x.name === recommendIndexName(tableName, x.columns, x.unique)
+    return { ...x, ...patch, name: wasRecommended ? recommendIndexName(tableName, cols, unique) : x.name }
+  }
+
   const idxRows = draft.idxs.map((ix) => (
     <div className="erd-row" key={ix.uid}>
-      <Input
-        size="small"
-        style={{ width: 150 }}
-        placeholder="索引名"
-        value={ix.name}
-        disabled={ix.isPrimary}
-        onChange={(e) => setIdxs((xs) => xs.map((x) => (x.uid === ix.uid ? { ...x, name: e.target.value } : x)))}
-      />
       <Select
         mode="multiple"
         size="small"
         style={{ flex: 1 }}
-        placeholder="列"
+        placeholder="先选列，索引名自动推荐"
         value={ix.columns}
         options={colNameOptions}
         onChange={(v) =>
           setIdxs((xs) =>
-            xs.map((x) => (x.uid === ix.uid ? { ...x, columns: v, subParts: [], directions: [] } : x)),
+            xs.map((x) => (x.uid === ix.uid ? followIndexName(x, { columns: v, subParts: [], directions: [] }, draft.name) : x)),
           )
         }
+      />
+      <Input
+        size="small"
+        style={{ width: 180 }}
+        placeholder="索引名（自动推荐，可改）"
+        value={ix.name}
+        disabled={ix.isPrimary}
+        onChange={(e) => setIdxs((xs) => xs.map((x) => (x.uid === ix.uid ? { ...x, name: e.target.value } : x)))}
       />
       {ix.isPrimary ? (
         <span className="erd-tag">PRIMARY</span>
@@ -425,7 +440,9 @@ export function ErTableDesigner() {
         <>
           <Checkbox
             checked={ix.unique}
-            onChange={(e) => setIdxs((xs) => xs.map((x) => (x.uid === ix.uid ? { ...x, unique: e.target.checked } : x)))}
+            onChange={(e) =>
+              setIdxs((xs) => xs.map((x) => (x.uid === ix.uid ? followIndexName(x, { unique: e.target.checked }, draft.name) : x)))
+            }
           >
             唯一
           </Checkbox>
