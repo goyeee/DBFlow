@@ -64,6 +64,8 @@ pub fn run() {
             commands::er::export_er_sql,
             commands::er::export_er_image,
             commands::er::export_tables_ddl,
+            commands::er::er_diff,
+            commands::er::preview_table_ddl,
             commands::navicat::navicat_scan,
             commands::navicat::navicat_import_ncx,
             commands::navicat::navicat_import,

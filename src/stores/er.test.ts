@@ -6,6 +6,7 @@ vi.mock('../api/commands', () => ({ api: {} }))
 
 import { api } from '../api/commands'
 import { useErStore } from './er'
+import { newTableSchema, snapshotTableToSchema } from '../components/er/modelSchema'
 
 const KEY_A = 'c1/db1/__er__'
 const KEY_B = 'c1/db2/__er__'
@@ -100,6 +101,9 @@ function mockApi(snapshot: ErSnapshot, doc: ErModelDoc | null) {
   ;(api as Record<string, unknown>).getErSnapshot = vi.fn().mockResolvedValue(snapshot)
   ;(api as Record<string, unknown>).loadErModel = vi.fn().mockResolvedValue(doc)
   ;(api as Record<string, unknown>).saveErModel = vi.fn().mockResolvedValue(undefined)
+  ;(api as Record<string, unknown>).erDiff = vi.fn().mockResolvedValue([])
+  ;(api as Record<string, unknown>).applySync = vi.fn().mockResolvedValue([])
+  ;(api as Record<string, unknown>).previewTableDdl = vi.fn().mockResolvedValue('')
 }
 
 const initialState = useErStore.getState()
@@ -417,7 +421,7 @@ describe('ER store：编辑与保存', () => {
     expect(t.dirty).toBe(false)
     expect(api.saveErModel).toHaveBeenCalledTimes(1)
     const doc = (api.saveErModel as ReturnType<typeof vi.fn>).mock.calls[0][2] as ErModelDoc
-    expect(doc.formatVersion).toBe(1)
+    expect(doc.formatVersion).toBe(2)
     expect(doc.origin.connectionName).toBe('本地')
     expect(doc.tables.find((x) => x.name === 'users')).toMatchObject({ x: 5, y: 6 })
     expect(doc.edges.find((e) => e.id === INF_ID)?.status).toBe('ignored')
@@ -459,5 +463,307 @@ describe('ER store：编辑与保存', () => {
     expect(t.docIssue).toContain('JSON')
     useErStore.getState().dismissDocIssue(KEY_A)
     expect(useErStore.getState().tabs[KEY_A].docIssue).toBeNull()
+  })
+})
+
+// ───────────────── 图上建模（二期 A） ─────────────────
+
+describe('ER store：图上建模', () => {
+  it('createTable 只打开设计器——未保存不落库（取消即无痕）；保存后才生效并给位置', async () => {
+    mockApi(snapWith(true), null)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    const lower = useErStore.getState().createTable(KEY_A)
+    expect(lower).toBe('new_table_1')
+    let t = useErStore.getState().tabs[KEY_A]!
+    expect(t.designerTable).toBe('new_table_1')
+    expect(t.designerNewTable).toBe('new_table_1')
+    // 未保存：无模型条目、无节点、不置脏
+    expect(t.modelTables.new_table_1).toBeUndefined()
+    expect(t.graph!.tables.new_table_1).toBeUndefined()
+    expect(t.dirty).toBe(false)
+    // 关闭设计器（取消）→ 待建标记清除，完全无痕
+    useErStore.getState().setDesignerTable(KEY_A, null)
+    t = useErStore.getState().tabs[KEY_A]!
+    expect(t.designerNewTable).toBeNull()
+    // 再次新建并保存 → 落库、画布出现、有位置、置脏
+    useErStore.getState().createTable(KEY_A)
+    const r = useErStore.getState().saveTableSchema(KEY_A, 'new_table_1', newTableSchema('new_table_1'))
+    expect(r.ok).toBe(true)
+    t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.new_table_1.schema?.columns[0].name).toBe('id')
+    expect(t.graph!.tables.new_table_1.modelStatus).toBe('new')
+    expect(t.positions.new_table_1).toBeDefined()
+    expect(t.dirty).toBe(true)
+    expect(t.designerNewTable).toBeNull()
+    expect(t.snapshot).not.toBeNull()
+  })
+
+  it('saveTableSchema：copy-on-edit 同步表落 schema；与库一致时不落（无假角标）', async () => {
+    mockApi(snapWith(true), null)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    const store = useErStore.getState()
+    // users 表原样保存 → 不产生 modelTables 条目
+    const src = store.tabs[KEY_A]!.snapshot!.tables.find((x) => x.name === 'users')!
+    const same = snapshotTableToSchema(src, [])
+    const r = store.saveTableSchema(KEY_A, 'users', same)
+    expect(r.ok).toBe(true)
+    expect(useErStore.getState().tabs[KEY_A]!.modelTables.users).toBeUndefined()
+    // 加一列再存 → 落 schema 且 graph 立即以模型为准
+    const changed = {
+      ...same,
+      columns: [...same.columns, { name: 'memo', dataType: 'varchar(50)', nullable: true, default: null, extra: '', comment: null, characterSet: null, collation: null }],
+    }
+    useErStore.getState().saveTableSchema(KEY_A, 'users', changed)
+    const t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.users?.schema).toEqual(changed)
+    expect(t.graph!.tables.users.modelStatus).toBe('edited')
+    expect(t.graph!.tables.users.columns.some((c) => c.name === 'memo')).toBe(true)
+  })
+
+  it('saveTableSchema 校验失败返回错误不落库；未应用新表改名 rekey', async () => {
+    mockApi(snapWith(true), null)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    const store = useErStore.getState()
+    store.createTable(KEY_A)
+    // 空列
+    let r = store.saveTableSchema(KEY_A, 'new_table_1', { ...newTableSchema('new_table_1'), columns: [] })
+    expect(r.ok).toBe(false)
+    // 与库表重名
+    r = useErStore.getState().saveTableSchema(KEY_A, 'new_table_1', newTableSchema('users'))
+    expect(r.ok).toBe(false)
+    // 已同步表不能改名
+    r = useErStore.getState().saveTableSchema(KEY_A, 'users', newTableSchema('renamed_users'))
+    expect(r.ok).toBe(false)
+    // 改名成功：条目/位置迁移到新键
+    r = useErStore.getState().saveTableSchema(KEY_A, 'new_table_1', newTableSchema('orders_v2'))
+    expect(r.ok).toBe(true)
+    const t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.new_table_1).toBeUndefined()
+    expect(t.modelTables.orders_v2?.schema?.name).toBe('orders_v2')
+    expect(t.positions.orders_v2).toBeDefined()
+    expect(t.positions.new_table_1).toBeUndefined()
+    expect(t.designerTable).toBe('orders_v2')
+  })
+
+  it('deleteTable/restoreTable：同步表转 tombstone（保留编辑），新建表直接移除；被引用阻止', async () => {
+    mockApi(snapWith(true), null)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    const store = useErStore.getState()
+    // 先给 user_roles 建一个引用 users 的模型 FK → 删 users 应被阻止
+    const r = store.addModelFk(KEY_A, { table: 'user_roles', columns: ['usersID'], refTable: 'users', refColumns: ['usersID'] })
+    expect(r.ok).toBe(true)
+    expect(store.deleteTable(KEY_A, 'users').ok).toBe(false) // 被阻止
+    let t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.users).toBeUndefined()
+    expect(t.graph!.tables.users.modelStatus).not.toBe('deleted')
+    // 删引用方 user_roles（已编辑）→ tombstone 且保留 schema
+    useErStore.getState().deleteTable(KEY_A, 'user_roles')
+    t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.user_roles?.deleted).toBe(true)
+    expect(t.modelTables.user_roles?.schema?.foreignKeys.length).toBeGreaterThan(0)
+    expect(t.graph!.tables.user_roles.modelStatus).toBe('deleted')
+    // 恢复：有编辑内容 → 恢复为已编辑态（编辑不丢）
+    useErStore.getState().restoreTable(KEY_A, 'user_roles')
+    t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.user_roles).toMatchObject({ deleted: false })
+    expect(t.modelTables.user_roles?.schema).toBeDefined()
+    expect(t.graph!.tables.user_roles.modelStatus).toBe('edited')
+    // 未编辑过的表：tombstone → 恢复 = 回到无痕
+    useErStore.getState().deleteTable(KEY_A, 'orders')
+    expect(useErStore.getState().tabs[KEY_A]!.modelTables.orders).toEqual({ schema: null, deleted: true })
+    useErStore.getState().restoreTable(KEY_A, 'orders')
+    expect(useErStore.getState().tabs[KEY_A]!.modelTables.orders).toBeUndefined()
+    // 新建表（已保存）删除 → 直接消失
+    useErStore.getState().createTable(KEY_A)
+    useErStore.getState().saveTableSchema(KEY_A, 'new_table_1', newTableSchema('new_table_1'))
+    useErStore.getState().deleteTable(KEY_A, 'new_table_1')
+    t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.new_table_1).toBeUndefined()
+    expect(t.graph!.tables.new_table_1).toBeUndefined()
+  })
+
+  it('addModelFk：子表 copy-on-edit（含库外键）+ mfk 边出现；removeModelFk 移除', async () => {
+    mockApi(snapWith(true), null)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    const store = useErStore.getState()
+    const r = store.addModelFk(KEY_A, { table: 'orders', columns: ['usersID'], refTable: 'users', refColumns: ['usersID'], onDelete: 'CASCADE' })
+    expect(r.ok).toBe(true)
+    let t = useErStore.getState().tabs[KEY_A]!
+    // 子表 copy-on-edit：结构来自快照（含库里的 fk_ur_user 外键）+ 新 FK 追加
+    expect(t.modelTables.orders?.schema?.foreignKeys).toHaveLength(1)
+    expect(t.modelTables.orders?.schema?.foreignKeys[0].onDelete).toBe('CASCADE')
+    expect(t.graph!.mfkEdges).toHaveLength(1)
+    expect(t.graph!.mfkEdges[0].id).toBe('mfk:orders:fk_orders_usersid')
+    // 重复外键名拒绝
+    const r2 = useErStore.getState().addModelFk(KEY_A, { table: 'orders', columns: ['usersID'], refTable: 'users', refColumns: ['usersID'] })
+    expect(r2.ok).toBe(false)
+    // 删除
+    useErStore.getState().removeModelFk(KEY_A, 'orders', 'fk_orders_usersid')
+    t = useErStore.getState().tabs[KEY_A]!
+    expect(t.graph!.mfkEdges).toHaveLength(0)
+    // 删完与库一致 → 条目整体清除（无假角标）
+    expect(t.modelTables.orders).toBeUndefined()
+  })
+})
+
+describe('ER store：v2 文档恢复与保存', () => {
+  const v2Schema = {
+    name: 'user_roles', engine: null, collation: null, comment: null,
+    columns: [
+      { name: 'user_rolesID', dataType: 'bigint', nullable: false, default: null, extra: '', comment: null, characterSet: null, collation: null },
+    ],
+    indexes: [{ name: 'PRIMARY', columns: ['user_rolesID'], subParts: [null], directions: [null], unique: true, isPrimary: true, indexType: 'BTREE' }],
+    foreignKeys: [{ name: 'fk_x', table: 'user_roles', columns: ['user_rolesID'], refTable: 'users', refColumns: ['usersID'], onDelete: null, onUpdate: null }],
+  }
+  const v2Doc: ErModelDoc = {
+    formatVersion: 2,
+    kind: 'mysql',
+    database: 'db1',
+    origin: { connectionName: '本地', capturedAt: '2026-01-01T00:00:00Z' },
+    tables: [
+      { id: 'users', name: 'users', x: 100, y: 200, collapsed: false },
+      { id: 'user_roles', name: 'user_roles', x: 300, y: 200, collapsed: false, schema: v2Schema },
+      { id: 'legacy', name: 'legacy', x: 500, y: 200, collapsed: false, status: 'deleted' },
+    ],
+    edges: [],
+  }
+
+  it('v2 文档：schema 表标 edited、tombstone 标 deleted、mfk 边恢复', async () => {
+    mockApi(snapWith(true), v2Doc)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    const t = useErStore.getState().tabs[KEY_A]!
+    expect(t.graph!.tables.user_roles.modelStatus).toBe('edited')
+    // legacy 是 tombstone 且快照（库）里没有该表 → 不进图；条目保留在 modelTables（应用时产出 DROP）
+    expect(t.graph!.tables.legacy).toBeUndefined()
+    expect(t.graph!.mfkEdges.map((e) => e.id)).toEqual(['mfk:user_roles:fk_x'])
+    expect(t.modelTables.legacy).toEqual({ schema: null, deleted: true })
+    expect(t.docIssue).toBeNull()
+  })
+
+  it('不受支持的版本号 → docIssue 提示、按无文档处理', async () => {
+    mockApi(snapWith(true), { ...v2Doc, formatVersion: 99 as 1 | 2 })
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    const t = useErStore.getState().tabs[KEY_A]!
+    expect(t.docIssue).toContain('99')
+    expect(t.modelTables).toEqual({})
+  })
+
+  it('v1 文档照常加载（惰性迁移），保存后升为 v2', async () => {
+    mockApi(snapWith(true), savedDoc)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    await useErStore.getState().save(KEY_A)
+    const calls = (api.saveErModel as ReturnType<typeof vi.fn>).mock.calls
+    const doc = calls[calls.length - 1]![2] as ErModelDoc
+    expect(doc.formatVersion).toBe(2)
+    expect(doc.tables.every((t) => t.schema === undefined && t.status === undefined)).toBe(true)
+  })
+})
+
+// ───────────────── 应用闭环（二期 A） ─────────────────
+
+import type { DiffItem } from '../api/types'
+
+function diffItem(over: Partial<DiffItem>): DiffItem {
+  return {
+    id: 'tbl:x', kind: 'table', action: 'create', table: 'x', name: 'x',
+    sourceDesc: null, targetDesc: null, sql: 'CREATE ...', sqlClause: null,
+    dangerous: false, sourceDdl: null, targetDdl: null,
+    ...over,
+  }
+}
+
+describe('ER store：应用闭环', () => {
+  it('runErDiff 组装 payload 并返回差异；无建模表返回空', async () => {
+    mockApi(snapWith(true), null)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    // 无建模表
+    let items = await useErStore.getState().runErDiff(KEY_A)
+    expect(items).toEqual([])
+    expect(api.erDiff).not.toHaveBeenCalled()
+    // 建表并保存后：payload 只含新表，表名用服务器大小写
+    useErStore.getState().createTable(KEY_A)
+    useErStore.getState().saveTableSchema(KEY_A, 'new_table_1', newTableSchema('new_table_1'))
+    ;(api.erDiff as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      diffItem({ id: 'tbl:new_table_1', table: 'new_table_1' }),
+    ])
+    items = await useErStore.getState().runErDiff(KEY_A)
+    const calls = (api.erDiff as ReturnType<typeof vi.fn>).mock.calls
+    expect(calls[calls.length - 1]![2]).toEqual([
+      { name: 'new_table_1', schema: expect.objectContaining({ name: 'new_table_1' }) },
+    ])
+    expect(items).toHaveLength(1)
+  })
+
+  it('refreshAfterApply：零差异表清条目；tombstone 移除；走线迁移；自动保存', async () => {
+    mockApi(snapWith(true), null)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    const store = useErStore.getState()
+    store.createTable(KEY_A) // new_table_1
+    store.saveTableSchema(KEY_A, 'new_table_1', newTableSchema('new_table_1')) // → CREATE（应用成功 → 清除）
+    useErStore.getState().addModelFk(KEY_A, { table: 'user_roles', columns: ['usersID'], refTable: 'users', refColumns: ['usersID'] })
+    // 手拖走线挂在 mfk 边上
+    useErStore.getState().setEdgeRoute(KEY_A, 'mfk:user_roles:fk_user_roles_usersid', [{ x: 9, y: 9 }])
+    // 库快照刷新后与模型一致（模拟已应用）
+    ;(api.getErSnapshot as ReturnType<typeof vi.fn>).mockResolvedValueOnce(snapWith(true))
+    ;(api.erDiff as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]) // 复跑：全部零差异
+
+    const remain = await useErStore.getState().refreshAfterApply(KEY_A)
+    expect(remain).toEqual([])
+    const t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables).toEqual({}) // 零差异全部清除
+    expect(t.graph!.tables.new_table_1).toBeUndefined() // 新表已不在快照 → 消失
+    expect(t.dirty).toBe(false) // 已自动保存
+    expect(t.edgeRoutes['fk:user_roles:fk_user_roles_usersid']).toEqual([{ x: 9, y: 9 }])
+    expect(t.edgeRoutes['mfk:user_roles:fk_user_roles_usersid']).toBeUndefined()
+  })
+
+  it('refreshAfterApply：仍有差异的表保留条目（部分应用/失败场景）', async () => {
+    mockApi(snapWith(true), null)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    useErStore.getState().createTable(KEY_A)
+    useErStore.getState().saveTableSchema(KEY_A, 'new_table_1', newTableSchema('new_table_1'))
+    ;(api.getErSnapshot as ReturnType<typeof vi.fn>).mockResolvedValueOnce(snapWith(true))
+    ;(api.erDiff as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      diffItem({ id: 'tbl:new_table_1', table: 'new_table_1' }), // 未应用（用户没勾）
+    ])
+    const remain = await useErStore.getState().refreshAfterApply(KEY_A)
+    expect(remain).toHaveLength(1)
+    const t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.new_table_1).toBeDefined() // 保留
+  })
+
+  it('refreshAfterApply：未应用的模型外键走线不迁移（mfk 键保留）', async () => {
+    mockApi(snapWith(true), null)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    useErStore.getState().addModelFk(KEY_A, { table: 'user_roles', columns: ['usersID'], refTable: 'users', refColumns: ['usersID'] })
+    useErStore.getState().setEdgeRoute(KEY_A, 'mfk:user_roles:fk_user_roles_usersid', [{ x: 3, y: 3 }])
+    ;(api.getErSnapshot as ReturnType<typeof vi.fn>).mockResolvedValueOnce(snapWith(true))
+    ;(api.erDiff as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
+      diffItem({ id: 'fk:user_roles:fk_user_roles_usersid', kind: 'foreignKey', action: 'modify', table: 'user_roles', name: 'fk_user_roles_usersid' }), // 用户没勾，未应用
+    ])
+    await useErStore.getState().refreshAfterApply(KEY_A)
+    const t = useErStore.getState().tabs[KEY_A]!
+    expect(t.edgeRoutes['mfk:user_roles:fk_user_roles_usersid']).toEqual([{ x: 3, y: 3 }])
+    expect(t.edgeRoutes['fk:user_roles:fk_user_roles_usersid']).toBeUndefined()
+  })
+})
+
+describe('评审修复：tombstone 表上建/删模型外键不复活删除标记', () => {
+  it('addModelFk/removeModelFk 保持 deleted: true', async () => {
+    mockApi(snapWith(true), null)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    const store = useErStore.getState()
+    store.addModelFk(KEY_A, { table: 'user_roles', columns: ['usersID'], refTable: 'users', refColumns: ['usersID'] })
+    useErStore.getState().deleteTable(KEY_A, 'user_roles')
+    // tombstone（保留编辑）上再建一条 FK → 仍应是 deleted
+    const r = useErStore.getState().addModelFk(KEY_A, { table: 'user_roles', columns: ['user_rolesID'], refTable: 'users', refColumns: ['usersID'] })
+    expect(r.ok).toBe(true)
+    let t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.user_roles?.deleted).toBe(true)
+    // 删除该 FK → 仍 deleted
+    useErStore.getState().removeModelFk(KEY_A, 'user_roles', 'fk_user_roles_usersid')
+    t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.user_roles?.deleted).toBe(true)
+    expect(t.modelTables.user_roles).toBeDefined() // tombstone 不因 sameAsDb 被清除
   })
 })

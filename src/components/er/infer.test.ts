@@ -34,7 +34,7 @@ function table(name: string, pk: string | null, columns: string[]): ErTable {
 function graph(tables: ErTable[], fkEdges: ErEdgeInfo[] = []) {
   const map: Record<string, ErTable> = {}
   for (const t of tables) map[t.name.toLowerCase()] = t
-  return { tables: map, fkEdges }
+  return { tables: map, fkEdges, mfkEdges: [] }
 }
 
 describe('命名推断：同名字段 = 目标表主键', () => {

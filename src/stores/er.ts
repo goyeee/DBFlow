@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 
 import { api } from '../api/commands'
-import type { ErModelDoc } from '../api/types'
+import type { DiffItem, ErModelDoc, ErSnapshot, ErTableSchema } from '../api/types'
 import { errText } from '../components/connection/ConnectionTree'
 import {
   buildErGraph,
@@ -15,6 +15,17 @@ import {
   type ManualEdgeInput,
 } from '../components/er/transform'
 import { inferEdges } from '../components/er/infer'
+import {
+  buildErDiffPayload,
+  makeModelFk,
+  nextNewTableName,
+  schemasEqual,
+  snapshotTableToSchema,
+  validateDeleteTable,
+  validateTableSchema,
+  type ModelFkInput,
+  type ModelTableState,
+} from '../components/er/modelSchema'
 import { dagreLayout, estimateNodeSize } from '../components/er/layout'
 import type { AnchorOverride } from '../components/er/edgeAnchors'
 import { withSessionReconnect } from './session'
@@ -62,6 +73,16 @@ export interface ErTabState {
   undoRoutes?: Record<string, { x: number; y: number }[]>
   /** 重新布局前的锚点覆盖快照，供撤销 */
   undoAnchors?: Record<string, { source?: AnchorOverride; target?: AnchorOverride }>
+  /** 逆向快照原样保留（copy-on-edit 的拷贝源 + 应用后刷新） */
+  snapshot: ErSnapshot | null
+  /** 编辑模式（显式开关；关闭只是隐藏编辑入口） */
+  editMode: boolean
+  /** 图上建模状态：小写表名 → schema/tombstone */
+  modelTables: Record<string, ModelTableState>
+  /** 表设计器正在编辑的表（小写；null=关） */
+  designerTable: string | null
+  /** 待保存的新建表名——设计器保存成功才落库，取消即无痕 */
+  designerNewTable: string | null
 }
 
 interface ErStore {
@@ -94,6 +115,28 @@ interface ErStore {
     anchor: AnchorOverride | null,
   ) => void
   save: (tabKey: string) => Promise<void>
+  setEditMode: (tabKey: string, v: boolean) => void
+  setDesignerTable: (tabKey: string, table: string | null) => void
+  /** 新建空表（预填 id 主键）并打开设计器；返回小写表键 */
+  createTable: (tabKey: string) => string | null
+  /** 保存设计器草稿（未应用新表可改名 → rekey）；与库一致时不落 schema */
+  saveTableSchema: (
+    tabKey: string,
+    lower: string,
+    schema: ErTableSchema,
+  ) => { ok: boolean; error?: string }
+  /** 删除表：同步表转 tombstone（保留编辑），新建表直接移除；被模型外键引用时阻止 */
+  deleteTable: (tabKey: string, lower: string) => { ok: boolean; error?: string }
+  /** 恢复 tombstone：有编辑 → 恢复编辑态；无编辑 → 回到无痕 */
+  restoreTable: (tabKey: string, lower: string) => void
+  /** 画布拖线建模型外键（子表 copy-on-edit） */
+  addModelFk: (tabKey: string, input: ModelFkInput) => { ok: boolean; error?: string }
+  removeModelFk: (tabKey: string, tableLower: string, fkName: string) => void
+  /** 应用变更第一步：模型 vs 库实时结构 diff */
+  runErDiff: (tabKey: string) => Promise<DiffItem[]>
+  /** 应用后刷新：拉新快照重建图 → 复跑 diff → 零差异表清条目（角标消失），
+   *  mfk 走线按需迁移到 fk 边 id → 自动保存文档。返回剩余差异（弹窗「重新比较」用） */
+  refreshAfterApply: (tabKey: string) => Promise<DiffItem[]>
   /** 关闭模型文档读取失败提示条 */
   dismissDocIssue: (tabKey: string) => void
   setSelectedTable: (tabKey: string, table: string | null) => void
@@ -120,7 +163,7 @@ function layoutGraph(
     id: t.name.toLowerCase(),
     ...estimateNodeSize(t.columns.length, !!collapsed[t.name.toLowerCase()]),
   }))
-  const edges = [...graph.fkEdges, ...extraEdges].map((e) => ({
+  const edges = [...graph.fkEdges, ...graph.mfkEdges, ...extraEdges].map((e) => ({
     source: e.sourceTable.toLowerCase(),
     target: e.targetTable.toLowerCase(),
   }))
@@ -135,6 +178,13 @@ export const useErStore = create<ErStore>((set, get) => {
       if (!t) return s
       return { tabs: { ...s.tabs, [tabKey]: { ...t, ...partial } } }
     })
+
+  /** 以当前 modelTables 重建派生图（编辑动作后调用） */
+  const rebuildGraph = (tabKey: string) => {
+    const t = get().tabs[tabKey]
+    if (!t?.snapshot) return
+    patchTab(tabKey, { graph: buildErGraph(t.snapshot, t.modelTables) })
+  }
 
   /** await 后的提交：仅当分片仍存在且 requestSeq 未变才生效，原子防慢响应覆盖 */
   const commit = (tabKey: string, seq: number, partial: Partial<ErTabState>) =>
@@ -176,6 +226,11 @@ export const useErStore = create<ErStore>((set, get) => {
             showInferred: prev?.showInferred ?? true,
             edgeRoutes: {},
             edgeAnchors: {},
+            snapshot: null,
+            editMode: prev?.editMode ?? false,
+            modelTables: {},
+            designerTable: null,
+            designerNewTable: null,
           },
         },
       }))
@@ -192,9 +247,17 @@ export const useErStore = create<ErStore>((set, get) => {
           docIssue = errText(e)
         }
 
-        const graph = buildErGraph(snapshot)
+        // 版本号校验：只认 1/2；其他版本不按无文档静默处理，要显式提示
+        let overlayInput = doc
+        if (doc && doc.formatVersion !== 1 && doc.formatVersion !== 2) {
+          docIssue = `文档版本 ${doc.formatVersion} 不受支持`
+          overlayInput = null
+        }
+        const overlay = docOverlay(overlayInput)
+        // 有 schema 的表以文档结构渲染（模型为准）；tombstone 标记
+        const modelTables = overlay.modelTables
+        const graph = buildErGraph(snapshot, modelTables)
         const inferredEdges = inferEdges(graph)
-        const overlay = docOverlay(doc)
         const lower = Object.keys(graph.tables)
 
         // 恢复手动关联；结构变更后表/列已不存在的丢弃
@@ -246,6 +309,7 @@ export const useErStore = create<ErStore>((set, get) => {
         // 连线路径：只保留当前仍存在的连线（fk/推断/手动）上的路径
         const allEdgeIds = new Set([
           ...graph.fkEdges.map((e) => e.id),
+          ...graph.mfkEdges.map((e) => e.id),
           ...inferredEdges.map((e) => e.id),
           ...manualEdges.map((e) => e.id),
         ])
@@ -258,9 +322,11 @@ export const useErStore = create<ErStore>((set, get) => {
         )
         commit(tabKey, seq, {
           status: 'ready',
+          snapshot,
           graph,
           inferredEdges,
           manualEdges,
+          modelTables,
           positions: cleanPositions,
           collapsed,
           inferredStatus,
@@ -383,6 +449,269 @@ export const useErStore = create<ErStore>((set, get) => {
         return { tabs: { ...s.tabs, [tabKey]: { ...t, edgeAnchors, dirty: true } } }
       }),
 
+    setEditMode: (tabKey, v) => patchTab(tabKey, { editMode: v }),
+    setDesignerTable: (tabKey, table) =>
+      patchTab(tabKey, {
+        designerTable: table,
+        // 关闭设计器 = 放弃未保存的新建表（无痕）
+        ...(table === null ? { designerNewTable: null } : {}),
+      }),
+
+    createTable: (tabKey) => {
+      const t = get().tabs[tabKey]
+      if (!t?.graph || !t.snapshot) return null
+      const name = nextNewTableName([...Object.keys(t.graph.tables), ...Object.keys(t.modelTables)])
+      const lower = name.toLowerCase()
+      // 只打开设计器：保存成功才落库（取消即无痕），位置在保存时补
+      patchTab(tabKey, { designerTable: lower, designerNewTable: name })
+      return lower
+    },
+
+    saveTableSchema: (tabKey, lower, schema) => {
+      const t = get().tabs[tabKey]
+      if (!t?.graph || !t.snapshot) return { ok: false, error: 'ER 图尚未加载' }
+      // 改名只允许未应用的新表（已同步表名在设计器中只读）
+      const inDb = t.snapshot.tables.some((s) => s.name.toLowerCase() === lower)
+      const newLower = schema.name.trim().toLowerCase()
+      if (newLower !== lower && inDb) return { ok: false, error: '已存在于库中的表不能改名' }
+      const others = new Set(
+        [...Object.keys(t.graph.tables), ...Object.keys(t.modelTables)].filter((n) => n !== lower),
+      )
+      const err = validateTableSchema(schema, others)
+      if (err) return { ok: false, error: err }
+      let modelTables = { ...t.modelTables }
+      let positions = t.positions
+      let collapsed = t.collapsed
+      if (newLower !== lower) {
+        delete modelTables[lower]
+        positions = { ...t.positions }
+        collapsed = { ...t.collapsed }
+        positions[newLower] = { ...(positions[lower] ?? { x: 0, y: 0 }) }
+        delete positions[lower]
+        if (collapsed[lower]) {
+          collapsed[newLower] = true
+          delete collapsed[lower]
+        }
+      }
+      // 与库结构完全一致的同步表 → 不落 schema（不留假「已编辑」角标）。
+      // 比较必须含该表的库外键（copy-on-edit 同源），用 schemasEqual 而非 JSON
+      const src = t.snapshot.tables.find((s) => s.name.toLowerCase() === newLower)
+      const srcFks = src
+        ? t.snapshot.foreignKeys.filter((f) => f.table.toLowerCase() === newLower)
+        : []
+      const sameAsDb = !!src && schemasEqual(schema, snapshotTableToSchema(src, srcFks))
+      const wasDeleted = !!modelTables[newLower]?.deleted
+      if (sameAsDb && !wasDeleted) {
+        delete modelTables[newLower]
+      } else {
+        // 防御：tombstone 表理论上进不了设计器；万一保存，保持 deleted 标记
+        modelTables[newLower] = { schema, deleted: wasDeleted }
+      }
+      // 新建表首次保存：补左侧堆叠位置（与 placeFreshTables 同风格）
+      if (!(newLower in positions)) {
+        positions = { ...positions }
+        const xs = Object.values(positions).map((p) => p.x)
+        const ys = Object.values(positions).map((p) => p.y)
+        positions[newLower] = {
+          x: (xs.length ? Math.min(...xs) : 0) - 460,
+          y: ys.length ? Math.min(...ys) : 0,
+        }
+      }
+      patchTab(tabKey, {
+        modelTables,
+        positions,
+        collapsed,
+        designerTable: newLower,
+        // 待建表已保存成功 → 清标记（后续关闭设计器不再回滚）
+        ...(t.designerNewTable && t.designerNewTable.toLowerCase() === lower
+          ? { designerNewTable: null }
+          : {}),
+        dirty: true,
+      })
+      rebuildGraph(tabKey)
+      return { ok: true }
+    },
+
+    deleteTable: (tabKey, lower) => {
+      const t = get().tabs[tabKey]
+      if (!t?.graph || !t.snapshot) return { ok: false, error: 'ER 图尚未加载' }
+      const blocked = validateDeleteTable(lower, t.modelTables)
+      if (blocked) return { ok: false, error: blocked }
+      const inDb = t.snapshot.tables.some((s) => s.name.toLowerCase() === lower)
+      const modelTables = { ...t.modelTables }
+      if (inDb) {
+        // tombstone：保留原 schema（先编辑后删的表，恢复时找回编辑内容）
+        modelTables[lower] = { schema: t.modelTables[lower]?.schema ?? null, deleted: true }
+      } else {
+        delete modelTables[lower] // 新建表直接移除
+      }
+      patchTab(tabKey, { modelTables, dirty: true })
+      rebuildGraph(tabKey)
+      return { ok: true }
+    },
+
+    restoreTable: (tabKey, lower) => {
+      const t = get().tabs[tabKey]
+      if (!t) return
+      const mt = t.modelTables[lower]
+      const modelTables = { ...t.modelTables }
+      if (mt?.schema) {
+        // 有编辑内容：撤销删除、恢复为已编辑态
+        modelTables[lower] = { schema: mt.schema, deleted: false }
+      } else {
+        // 未编辑过：恢复 = 回到「无建模痕迹」
+        delete modelTables[lower]
+      }
+      patchTab(tabKey, { modelTables, dirty: true })
+      rebuildGraph(tabKey)
+    },
+
+    addModelFk: (tabKey, input) => {
+      const t = get().tabs[tabKey]
+      if (!t?.graph || !t.snapshot) return { ok: false, error: 'ER 图尚未加载' }
+      const childLower = input.table.toLowerCase()
+      const existing = t.modelTables[childLower]
+      // copy-on-edit：子表未有 schema 时从快照全量拷贝（含该表的库外键）
+      const base =
+        existing?.schema ??
+        (() => {
+          const src = t.snapshot!.tables.find((s) => s.name.toLowerCase() === childLower)
+          if (!src) return null
+          const srcFks = t
+            .snapshot!.foreignKeys.filter((f) => f.table.toLowerCase() === childLower)
+          return snapshotTableToSchema(src, srcFks)
+        })()
+      if (!base) return { ok: false, error: '找不到子表结构' }
+      const fk = makeModelFk(input)
+      if (base.foreignKeys.some((f) => f.name.toLowerCase() === fk.name.toLowerCase()))
+        return { ok: false, error: `外键名「${fk.name}」已存在` }
+      // 引用列/本表列存在性由 validateTableSchema 统一把关：先组装再校验
+      const schema = { ...base, foreignKeys: [...base.foreignKeys, fk] }
+      const others = new Set(
+        [...Object.keys(t.graph.tables), ...Object.keys(t.modelTables)].filter(
+          (n) => n !== childLower,
+        ),
+      )
+      const err = validateTableSchema(schema, others)
+      if (err) return { ok: false, error: err }
+      // tombstone 表上建 FK 不复活删除标记（恢复必须走 restoreTable）
+      patchTab(tabKey, {
+        modelTables: {
+          ...t.modelTables,
+          [childLower]: { schema, deleted: !!t.modelTables[childLower]?.deleted },
+        },
+        dirty: true,
+      })
+      rebuildGraph(tabKey)
+      return { ok: true }
+    },
+
+    removeModelFk: (tabKey, tableLower, fkName) => {
+      const t = get().tabs[tabKey]
+      if (!t?.snapshot) return
+      const mt = t.modelTables[tableLower]
+      if (!mt?.schema) return
+      const fks = mt.schema.foreignKeys.filter(
+        (f) => f.name.toLowerCase() !== fkName.toLowerCase(),
+      )
+      const schema = { ...mt.schema, foreignKeys: fks }
+      const modelTables = { ...t.modelTables }
+      // 删完与库一致 → 条目整体清除
+      const src = t.snapshot.tables.find((s) => s.name.toLowerCase() === tableLower)
+      const srcFks = src
+        ? t.snapshot.foreignKeys.filter((f) => f.table.toLowerCase() === tableLower)
+        : []
+      const sameAsDb = !!src && schemasEqual(schema, snapshotTableToSchema(src, srcFks))
+      const wasDeleted = !!t.modelTables[tableLower]?.deleted
+      // tombstone 不因 sameAsDb 被清除；删除标记保持
+      if (sameAsDb && !wasDeleted) delete modelTables[tableLower]
+      else modelTables[tableLower] = { schema, deleted: wasDeleted }
+      patchTab(tabKey, { modelTables, dirty: true })
+      rebuildGraph(tabKey)
+    },
+
+    runErDiff: async (tabKey) => {
+      const t = get().tabs[tabKey]
+      if (!t?.graph) throw new Error('ER 图尚未加载')
+      const serverNames = Object.fromEntries(
+        Object.entries(t.graph.tables).map(([k, v]) => [k, v.name]),
+      )
+      const payload = buildErDiffPayload(t.modelTables, serverNames)
+      if (payload.length === 0) return []
+      return withSessionReconnect(t.connectionId, () =>
+        api.erDiff(t.connectionId, t.database, payload),
+      )
+    },
+
+    refreshAfterApply: async (tabKey) => {
+      const t = get().tabs[tabKey]
+      if (!t) return []
+      const seq = t.requestSeq
+      const snapshot = await withSessionReconnect(t.connectionId, () =>
+        api.getErSnapshot(t.connectionId, t.database),
+      )
+      // 图以「新快照 + 现有 modelTables」重建（布局/折叠/走线等全部保留）
+      const graph = buildErGraph(snapshot, t.modelTables)
+      const inferredEdges = inferEdges(graph)
+      commit(tabKey, seq, { snapshot, graph, inferredEdges })
+
+      // 复跑 diff 决定清理范围
+      const cur = get().tabs[tabKey]
+      if (!cur) return []
+      const serverNames = Object.fromEntries(
+        Object.entries(cur.graph?.tables ?? {}).map(([k, v]) => [k, v.name]),
+      )
+      const payload = buildErDiffPayload(cur.modelTables, serverNames)
+      let remain: DiffItem[] = []
+      if (payload.length > 0) {
+        remain = await withSessionReconnect(cur.connectionId, () =>
+          api.erDiff(cur.connectionId, cur.database, payload),
+        )
+      }
+      // 有差异项的表保留条目；零差异/tombstone 已消失的清除
+      // （新建表可能已存在库里而 remain 为空 → 同样清除，角标消失）
+      const tablesWithDiff = new Set(remain.map((i) => i.table.toLowerCase()))
+      const modelTables: typeof cur.modelTables = {}
+      for (const [lower, mt] of Object.entries(cur.modelTables)) {
+        if (tablesWithDiff.has(lower)) modelTables[lower] = mt
+      }
+      // mfk → fk 走线/锚点迁移：仅迁移「复跑差异里已无对应 FK 项」的边
+      // （该 FK 已应用/收敛，真实 FK 边即将出现）；未应用的 FK 边保留 mfk 键，
+      // 否则用户没勾选的模型外键走线会丢
+      const pendingFkIds = new Set(
+        remain.filter((i) => i.kind === 'foreignKey').map((i) => i.id.toLowerCase()),
+      )
+      const edgeRoutes = { ...cur.edgeRoutes }
+      const edgeAnchors = { ...cur.edgeAnchors }
+      for (const key of Object.keys(edgeRoutes)) {
+        const m = key.match(/^mfk:(.+):(.+)$/)
+        if (!m) continue
+        const fkKey = `fk:${m[1]}:${m[2]}`
+        if (pendingFkIds.has(fkKey.toLowerCase())) continue
+        if (!(fkKey in edgeRoutes)) edgeRoutes[fkKey] = edgeRoutes[key]
+        delete edgeRoutes[key]
+      }
+      for (const key of Object.keys(edgeAnchors)) {
+        const m = key.match(/^mfk:(.+):(.+)$/)
+        if (!m) continue
+        const fkKey = `fk:${m[1]}:${m[2]}`
+        if (pendingFkIds.has(fkKey.toLowerCase())) continue
+        if (!(fkKey in edgeAnchors)) edgeAnchors[fkKey] = edgeAnchors[key]
+        delete edgeAnchors[key]
+      }
+      const graph2 = buildErGraph(snapshot, modelTables)
+      commit(tabKey, seq, {
+        modelTables,
+        graph: graph2,
+        inferredEdges: inferEdges(graph2),
+        edgeRoutes,
+        edgeAnchors,
+        dirty: true,
+      })
+      await get().save(tabKey) // 应用成功后的文档变化直接落盘，不留给用户手动保存
+      return remain
+    },
+
     save: async (tabKey) => {
       const t = get().tabs[tabKey]
       if (!t || !t.graph || !t.connectionId || !t.database) return
@@ -400,6 +729,8 @@ export const useErStore = create<ErStore>((set, get) => {
         inferredStatus: t.inferredStatus,
         edgeRoutes: t.edgeRoutes,
         edgeAnchors: t.edgeAnchors,
+        mfkEdges: t.graph.mfkEdges,
+        modelTables: t.modelTables,
       })
       await api.saveErModel(t.connectionId, t.database, doc)
       // 保存期间若发生了新的 load（seq 已变），不清新分片的 dirty

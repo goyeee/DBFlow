@@ -1,5 +1,6 @@
 //! 结构对比引擎：双端快照 → 差异项列表（纯函数，可单测；一源多目标时可直接复用）。
 pub mod sqlgen;
+pub mod er_model;
 
 use std::collections::BTreeMap;
 
@@ -17,6 +18,8 @@ pub enum DiffKind {
     Table,
     Column,
     Index,
+    #[serde(rename = "foreignKey")]
+    ForeignKey,
     View,
 }
 
@@ -74,6 +77,9 @@ pub struct DiffItem {
     /// 合并为一条 ALTER；None 表示该项不参与列合并（表/索引/视图等独立语句）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sql_clause: Option<String>,
+    /// 外键项专用：引用的表名（前端删表勾选联动用）；其余 kind 恒 None
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_table: Option<String>,
     /// 破坏性操作（DROP 表/列/索引）→ 前端红色标注 + 默认不勾选
     pub dangerous: bool,
     /// 源端该表完整建表 DDL（DDL 对比视图用；表在源端不存在时为 None）
@@ -237,6 +243,7 @@ fn table_rename(db: &str, s: &TableDef, t: &TableDef, src_ddl: &str, tgt_ddl: &s
             sqlgen::qualified(db, &s.name)
         )),
         sql_clause: None,
+        ref_table: None,
         dangerous: false,
         source_ddl: Some(src_ddl.to_string()),
         target_ddl: Some(tgt_ddl.to_string()),
@@ -254,6 +261,7 @@ fn table_create(db: &str, s: &TableDef, src_ddl: &str) -> DiffItem {
         target_desc: None,
         sql: Some(create_table_sql(db, s)),
         sql_clause: None,
+        ref_table: None,
         dangerous: false,
         source_ddl: Some(src_ddl.to_string()),
         target_ddl: None,
@@ -272,6 +280,7 @@ fn table_noop(s: &TableDef, t: &TableDef, src_ddl: &str, tgt_ddl: &str) -> DiffI
         target_desc: Some(describe_table_options(t)),
         sql: None,
         sql_clause: None,
+        ref_table: None,
         dangerous: false,
         source_ddl: Some(src_ddl.to_string()),
         target_ddl: Some(tgt_ddl.to_string()),
@@ -289,6 +298,7 @@ fn table_drop(db: &str, t: &TableDef, tgt_ddl: &str) -> DiffItem {
         target_desc: Some(format!("{} 个列，待删除", t.columns.len())),
         sql: Some(format!("DROP TABLE {}", sqlgen::qualified(db, &t.name))),
         sql_clause: None,
+        ref_table: None,
         dangerous: true,
         source_ddl: None,
         target_ddl: Some(tgt_ddl.to_string()),
@@ -310,7 +320,7 @@ fn diff_table(
         id, kind, action,
         table: s.name.clone(),
         name,
-        source_desc, target_desc, sql, sql_clause, dangerous,
+        source_desc, target_desc, sql, sql_clause, ref_table: None, dangerous,
         source_ddl: Some(src_ddl.to_string()),
         target_ddl: Some(tgt_ddl.to_string()),
     };
@@ -547,6 +557,7 @@ fn diff_views(src: &[ViewDef], tgt: &[ViewDef], db: &str) -> Vec<DiffItem> {
                 target_desc: None,
                 sql: Some(sqlgen::create_view_sql(db, sv)),
                 sql_clause: None,
+                ref_table: None,
                 dangerous: false,
                 source_ddl: Some(sqlgen::create_view_sql(db, sv)),
                 target_ddl: None,
@@ -564,6 +575,7 @@ fn diff_views(src: &[ViewDef], tgt: &[ViewDef], db: &str) -> Vec<DiffItem> {
                     target_desc: Some(sqlgen::describe_view(tv)),
                     sql: Some(sqlgen::alter_view_sql(db, sv)),
                     sql_clause: None,
+                    ref_table: None,
                     dangerous: false,
                     source_ddl: Some(source_ddl),
                     target_ddl: Some(target_ddl),
@@ -584,6 +596,7 @@ fn diff_views(src: &[ViewDef], tgt: &[ViewDef], db: &str) -> Vec<DiffItem> {
                 target_desc: Some(sqlgen::describe_view(tv)),
                 sql: Some(sqlgen::drop_view_sql(db, tv)),
                 sql_clause: None,
+                ref_table: None,
                 dangerous: true,
                 source_ddl: None,
                 target_ddl: Some(sqlgen::create_view_sql(db, tv)),

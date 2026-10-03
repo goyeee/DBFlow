@@ -12,6 +12,8 @@ export type TableNodeData = Record<string, unknown> & {
   collapsed: boolean
   /** 搜索命中/选中高亮 */
   highlight: boolean
+  /** 图上建模状态：new/edited/deleted（角标渲染） */
+  modelStatus?: 'new' | 'edited' | 'deleted'
   /** 搜索命中的列名（小写）→ 列行高亮 */
   matchedColumns?: string[]
   /** 关系高亮的列级标记（列名小写 → 标记类型），随选中/悬停关系线派生 */
@@ -35,7 +37,7 @@ const POSITION_BY_SIDE: Record<AnchorSide, Position> = {
  *  关系线锚定在表边框的「锚点 Handle」（隐形，自动均布或被手拖覆盖），
  *  列行 Handle 仅用于拖拽创建手动关联 */
 export const TableNode = memo(function TableNode({ id, data }: NodeProps) {
-  const { table, collapsed, highlight, matchedColumns, markCols, anchors, onHeaderClick, onColumnPick } =
+  const { table, collapsed, highlight, modelStatus, matchedColumns, markCols, anchors, onHeaderClick, onColumnPick } =
     data as TableNodeData
   const tabKey = useErTabKey()
   const updateNodeInternals = useUpdateNodeInternals()
@@ -93,6 +95,11 @@ export const TableNode = memo(function TableNode({ id, data }: NodeProps) {
             if (isClick(e)) onHeaderClick?.(id)
           }}
         >
+          {modelStatus && (
+            <span className={`er-model-badge er-model-badge-${modelStatus}`}>
+              {modelStatus === 'new' ? '新' : modelStatus === 'edited' ? '改' : '删'}
+            </span>
+          )}
           <span className="er-table-name">{table.name}</span>
           {table.comment && <span className="er-table-comment">{table.comment}</span>}
           <span

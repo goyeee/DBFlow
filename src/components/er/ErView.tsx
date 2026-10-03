@@ -10,6 +10,7 @@ import { useConnectionsStore } from '../../stores/connections'
 import { LAYOUT_LIMIT, useErStore } from '../../stores/er'
 import { ErCanvas } from './ErCanvas'
 import { ErDrawer } from './ErDrawer'
+import { ErTableDesigner } from './ErTableDesigner'
 import { ErToolbar } from './ErToolbar'
 import { ErTabProvider } from './erTabContext'
 
@@ -113,6 +114,7 @@ export function ErView({ tab }: { tab: ErTab }) {
             </ReactFlowProvider>
           </div>
           <ErDrawer />
+          <ErTableDesigner />
         </ErTabProvider>
       )}
     </div>

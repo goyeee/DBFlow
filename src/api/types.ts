@@ -139,7 +139,7 @@ export interface NavicatImportResult {
 
 // ───────────────── 结构对比与同步 ─────────────────
 
-export type DiffKind = 'table' | 'column' | 'index' | 'view'
+export type DiffKind = 'table' | 'column' | 'index' | 'foreignKey' | 'view'
 export type DiffAction = 'create' | 'drop' | 'modify' | 'rename' | 'noop'
 
 export interface CompareOptions {
@@ -162,6 +162,8 @@ export interface DiffItem {
   /** 列变更的 ALTER 子句（不含 ALTER TABLE 前缀），如 "ADD COLUMN `x` int NULL AFTER `id`"；
    *  同表勾选的列按此合并为一条 ALTER。表/索引/视图等独立语句为 null/缺省 */
   sqlClause?: string | null
+  /** 外键项专用：引用的表名（删表勾选联动用）；其余 kind 无此字段 */
+  refTable?: string | null
   /** 破坏性操作（DROP 类）→ 默认不勾选 */
   dangerous: boolean
   /** 源端该表完整建表 DDL（表在源端不存在为 null） */
@@ -358,21 +360,83 @@ export interface ErSnapshot {
   serverVersion: string | null
 }
 
-/** ER 模型文档（.er.json）：只存"图"的信息（布局/关系裁决），列结构每次从库实时取。
- *  纯文本可 git diff/合并，为多人协作预留 */
+/** ER 模型文档（.er.json）：布局/关系裁决 + 建模表结构（v2）。
+ *  未编辑的表不存结构（实时取）；schema 存在即「模型为准」。纯文本可 git diff/合并，为多人协作预留 */
 export interface ErModelDoc {
-  formatVersion: 1
+  /** 读取接受 1/2，写出恒 2；v1 打开按无 schema 的 v2 处理（惰性迁移） */
+  formatVersion: 1 | 2
   kind: DatabaseKind
   database: string
   origin: { connectionName: string; capturedAt: string }
-  tables: { id: string; name: string; x: number; y: number; collapsed: boolean }[]
+  tables: ErDocTable[]
   edges: ErDocEdge[]
+}
+
+export interface ErDocTable {
+  id: string
+  name: string
+  x: number
+  y: number
+  collapsed: boolean
+  /** 仅 tombstone：待删除（应用前可恢复） */
+  status?: 'deleted'
+  /** 完整表结构；仅新建/编辑过的表有（tombstone 保留编辑内容时也有） */
+  schema?: ErTableSchema
+}
+
+/** 模型表结构：字段与后端 TableDef 对齐（payload 直接透传） */
+export interface ErTableSchema {
+  name: string
+  engine: string | null
+  collation: string | null
+  comment: string | null
+  columns: ErColumnSchema[]
+  indexes: ErIndexSchema[]
+  foreignKeys: ErFkSchema[]
+}
+
+export interface ErColumnSchema {
+  name: string
+  dataType: string
+  nullable: boolean
+  default: string | null
+  extra: string
+  comment: string | null
+  characterSet: string | null
+  collation: string | null
+}
+
+export interface ErIndexSchema {
+  name: string
+  columns: string[]
+  subParts: (number | null)[]
+  directions: (string | null)[]
+  unique: boolean
+  isPrimary: boolean
+  indexType: string | null
+}
+
+/** 模型外键（回库生成 DDL 的那种；与纯标注的手动关联区分） */
+export interface ErFkSchema {
+  name: string
+  table: string
+  columns: string[]
+  refTable: string
+  refColumns: string[]
+  onDelete: string | null
+  onUpdate: string | null
+}
+
+/** er_diff 的模型 payload：schema 缺省/null = tombstone（待删除） */
+export interface ErModelTableInput {
+  name: string
+  schema?: ErTableSchema | null
 }
 
 export interface ErDocEdge {
   id: string
-  kind: 'fk' | 'inferred' | 'manual'
-  /** inferred 边的用户裁决；fk/manual 边无此字段 */
+  kind: 'fk' | 'inferred' | 'manual' | 'mfk'
+  /** inferred 边的用户裁决；fk/manual/mfk 边无此字段 */
   status?: 'confirmed' | 'ignored'
   source: { table: string; column: string }
   target: { table: string; column: string }

@@ -2,7 +2,9 @@ use serde::Serialize;
 use tauri::State;
 use uuid::Uuid;
 
+use crate::compare::er_model::{diff_model_vs_db, ErModelTableInput, ErTableSchemaInput};
 use crate::compare::sqlgen::{create_table_sql, foreign_key_ddl};
+use crate::compare::DiffItem;
 use crate::config::er_models::ErModelStore;
 use crate::datasource::{ForeignKeyDef, Registry, TableDef};
 use crate::error::{AppError, AppResult};
@@ -118,6 +120,37 @@ pub async fn export_tables_ddl(
         out.push(foreign_key_ddl(&database, fk));
     }
     Ok(out.join("\n\n"))
+}
+
+/// ER 图上建模的「应用变更」第一步：模型 payload vs 库实时结构 → 差异清单。
+/// 只比较模型涉及的表；库里其他表永不参与
+#[tauri::command]
+pub async fn er_diff(
+    registry: State<'_, Registry>,
+    connection_id: Uuid,
+    database: String,
+    model: Vec<ErModelTableInput>,
+) -> AppResult<Vec<DiffItem>> {
+    let conn = live(&registry, connection_id).await?;
+    let involved: Vec<String> = model.iter().map(|t| t.name.clone()).collect();
+    let snap = conn.snapshot_tables(&database, Some(&involved)).await?;
+    let fks = conn.list_foreign_keys(&database).await?;
+    diff_model_vs_db(&database, &model, &snap, &fks)
+}
+
+/// 表设计器底部实时 DDL 预览（不落库）。外键作为独立 ALTER 追加——
+/// 外键 Tab 的编辑在预览里必须可见，否则用户以为没生效
+#[tauri::command]
+pub async fn preview_table_ddl(
+    database: String,
+    schema: ErTableSchemaInput,
+) -> AppResult<String> {
+    let mut out = create_table_sql(&database, &schema.table);
+    for fk in &schema.foreign_keys {
+        out.push_str(";\n\n");
+        out.push_str(&foreign_key_ddl(&database, fk));
+    }
+    Ok(out)
 }
 
 /// 选中范围内、且两端表都在集合内的外键。比较统一忽略大小写：

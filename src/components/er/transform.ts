@@ -1,5 +1,6 @@
 import type { DatabaseKind, ErModelDoc, ErSnapshot } from '../../api/types'
 import type { AnchorOverride } from './edgeAnchors'
+import { schemaToErTable, type ModelTableState } from './modelSchema'
 
 /** 画布上的表：结构来自实时快照（文档只存布局，不冗余列定义） */
 /** 画布上的索引摘要（详情抽屉展示用） */
@@ -18,6 +19,8 @@ export interface ErTable {
   indexes: ErIndexDisplay[]
   /** 单列主键名（命名推断的目标列）；复合主键/无主键为 null */
   singlePrimaryKey: string | null
+  /** 图上建模状态：new=库没有；edited=文档 schema 为准；deleted=tombstone */
+  modelStatus?: 'new' | 'edited' | 'deleted'
 }
 
 export interface ErColumnDisplay {
@@ -30,11 +33,11 @@ export interface ErColumnDisplay {
   comment: string | null
 }
 
-/** 关系边：fk = 真实外键；inferred = 命名推断；manual = 用户手动添加 */
+/** 关系边：fk = 真实外键；inferred = 命名推断；manual = 用户手动添加；mfk = 模型外键（未应用） */
 export interface ErEdgeInfo {
-  /** fk:{表}:{约束名} / inf|man:{源表}.{源列}->{目标表}.{目标列} */
+  /** fk:{表}:{约束名} / inf|man:{源表}.{源列}->{目标表}.{目标列} / mfk:{表}:{约束名} */
   id: string
-  kind: 'fk' | 'inferred' | 'manual'
+  kind: 'fk' | 'inferred' | 'manual' | 'mfk'
   sourceTable: string
   sourceColumns: string[]
   targetTable: string
@@ -48,10 +51,65 @@ export interface ErGraph {
   /** key 为表名小写（MySQL 表名大小写敏感性随平台，统一小写比较） */
   tables: Record<string, ErTable>
   fkEdges: ErEdgeInfo[]
+  /** 模型外键（未应用的建模 FK；已存在于库的同名 FK 走 fkEdges） */
+  mfkEdges: ErEdgeInfo[]
 }
 
-/** 快照 → 画布图数据。列按键类型分类，外键转为边 */
-export function buildErGraph(snapshot: ErSnapshot): ErGraph {
+/** 快照表 → 展示结构（列按键类型分类）。原 buildErGraph 单表转换逻辑 */
+function toDisplayTable(t: ErSnapshot['tables'][number]): ErTable {
+  const pkIndex = t.indexes.find((i) => i.isPrimary)
+  const pkCols = new Set(pkIndex?.columns ?? [])
+  // 仅单列唯一索引（非主键）的列标 UK；复合唯一的各列不逐列标，在索引列表体现，
+  // 否则读者会误以为复合唯一键中每列都单列唯一
+  const singleUniqueCols = new Set(
+    t.indexes
+      .filter((i) => i.unique && !i.isPrimary && i.columns.length === 1)
+      .flatMap((i) => i.columns),
+  )
+  return {
+    name: t.name,
+    comment: t.comment,
+    singlePrimaryKey: pkIndex && pkIndex.columns.length === 1 ? pkIndex.columns[0] : null,
+    indexes: t.indexes.map((i) => ({
+      name: i.name,
+      columns: i.columns,
+      unique: i.unique,
+      primary: i.isPrimary,
+      indexType: i.indexType,
+    })),
+    columns: t.columns.map((c) => ({
+      name: c.name,
+      dataType: c.dataType,
+      nullable: c.nullable,
+      key: pkCols.has(c.name) ? 'pk' : singleUniqueCols.has(c.name) ? 'unique' : 'none',
+      default: c.default,
+      comment: c.comment,
+    })),
+  }
+}
+
+function toFkEdge(fk: ErSnapshot['foreignKeys'][number]): ErEdgeInfo {
+  return {
+    id: `fk:${fk.table}:${fk.name}`,
+    kind: 'fk',
+    fkName: fk.name,
+    sourceTable: fk.table,
+    sourceColumns: fk.columns,
+    targetTable: fk.refTable,
+    targetColumns: fk.refColumns,
+    onDelete: fk.onDelete,
+    onUpdate: fk.onUpdate,
+  }
+}
+
+/** 快照（+ 可选模型表）→ 画布图数据。
+ *  有 schema 的表以文档结构渲染（模型为准）；tombstone 表以库结构渲染并标 deleted；
+ *  新建表只来自 schema。表被模型接管时库 FK 边按 schema 去留；模型新增 FK → mfk 边 */
+export function buildErGraph(
+  snapshot: ErSnapshot,
+  modelTables?: Record<string, ModelTableState>,
+): ErGraph {
+  const models = modelTables ?? {}
   const tables: Record<string, ErTable> = {}
   for (const t of snapshot.tables) {
     const key = t.name.toLowerCase()
@@ -62,51 +120,61 @@ export function buildErGraph(snapshot: ErSnapshot): ErGraph {
         `存在仅大小写不同的同名表「${tables[key].name}」与「${t.name}」，无法在同一 ER 图区分，请重命名后再打开`,
       )
     }
-    const pkIndex = t.indexes.find((i) => i.isPrimary)
-    const pkCols = new Set(pkIndex?.columns ?? [])
-    // 仅单列唯一索引（非主键）的列标 UK；复合唯一的各列不逐列标，在索引列表体现，
-    // 否则读者会误以为复合唯一键中每列都单列唯一
-    const singleUniqueCols = new Set(
-      t.indexes
-        .filter((i) => i.unique && !i.isPrimary && i.columns.length === 1)
-        .flatMap((i) => i.columns),
-    )
-    tables[key] = {
-      name: t.name,
-      comment: t.comment,
-      singlePrimaryKey: pkIndex && pkIndex.columns.length === 1 ? pkIndex.columns[0] : null,
-      indexes: t.indexes.map((i) => ({
-        name: i.name,
-        columns: i.columns,
-        unique: i.unique,
-        primary: i.isPrimary,
-        indexType: i.indexType,
-      })),
-      columns: t.columns.map((c) => ({
-        name: c.name,
-        dataType: c.dataType,
-        nullable: c.nullable,
-        key: pkCols.has(c.name) ? 'pk' : singleUniqueCols.has(c.name) ? 'unique' : 'none',
-        default: c.default,
-        comment: c.comment,
-      })),
+    const base = toDisplayTable(t)
+    const overlay = models[key]
+    if (overlay?.deleted) {
+      base.modelStatus = 'deleted'
+      tables[key] = base
+    } else if (overlay?.schema) {
+      const mt = schemaToErTable(overlay.schema)
+      mt.modelStatus = 'edited'
+      tables[key] = mt
+    } else {
+      tables[key] = base
     }
   }
-  const fkEdges: ErEdgeInfo[] = snapshot.foreignKeys.map((fk) => ({
-    id: `fk:${fk.table}:${fk.name}`,
-    kind: 'fk',
-    fkName: fk.name,
-    sourceTable: fk.table,
-    sourceColumns: fk.columns,
-    targetTable: fk.refTable,
-    targetColumns: fk.refColumns,
-    onDelete: fk.onDelete,
-    onUpdate: fk.onUpdate,
-  }))
-  return { tables, fkEdges }
+  // 新建表：只在 modelTables 里、快照没有
+  for (const [key, m] of Object.entries(models)) {
+    if (tables[key] || !m.schema) continue
+    const mt = schemaToErTable(m.schema)
+    mt.modelStatus = 'new'
+    tables[key] = mt
+  }
+  // FK 边：表被模型接管时按 schema 决定去留（模型删掉的 FK 应用前不再展示）；
+  // 模型新增（库里没有同名）的 FK → mfk 边
+  const fkEdges: ErEdgeInfo[] = []
+  for (const fk of snapshot.foreignKeys) {
+    const tKey = fk.table.toLowerCase()
+    const owned = models[tKey]?.schema?.foreignKeys
+    if (owned && !owned.some((f) => f.name.toLowerCase() === fk.name.toLowerCase())) {
+      continue
+    }
+    fkEdges.push(toFkEdge(fk))
+  }
+  const mfkEdges: ErEdgeInfo[] = []
+  for (const [key, m] of Object.entries(models)) {
+    for (const fk of m.schema?.foreignKeys ?? []) {
+      const inDb = snapshot.foreignKeys.some(
+        (d) => d.table.toLowerCase() === key && d.name.toLowerCase() === fk.name.toLowerCase(),
+      )
+      if (inDb) continue
+      mfkEdges.push({
+        id: `mfk:${fk.table}:${fk.name}`,
+        kind: 'mfk',
+        fkName: fk.name,
+        sourceTable: fk.table,
+        sourceColumns: fk.columns,
+        targetTable: fk.refTable,
+        targetColumns: fk.refColumns,
+        onDelete: fk.onDelete,
+        onUpdate: fk.onUpdate,
+      })
+    }
+  }
+  return { tables, fkEdges, mfkEdges }
 }
 
-/** 文档叠加到实时图上的信息：布局、推断边裁决、手动关联、连线路径、端点锚点 */
+/** 文档叠加到实时图上的信息：布局、推断边裁决、手动关联、连线路径、端点锚点、建模表 */
 export interface ErDocOverlay {
   positions: Record<string, { x: number; y: number }>
   collapsed: Record<string, boolean>
@@ -116,6 +184,8 @@ export interface ErDocOverlay {
   edgeRoutes: Record<string, { x: number; y: number }[]>
   /** edgeId → 手拖端点锚点覆盖（source/target 各自独立） */
   edgeAnchors: Record<string, { source?: AnchorOverride; target?: AnchorOverride }>
+  /** 图上建模状态（小写表名 → schema/tombstone） */
+  modelTables: Record<string, ModelTableState>
 }
 
 /** 文档里的锚点字段 → 覆盖值；形状非法返回 undefined，pos 钳制到 0–1 */
@@ -137,13 +207,21 @@ export function docOverlay(doc: ErModelDoc | null): ErDocOverlay {
     manualEdges: [],
     edgeRoutes: {},
     edgeAnchors: {},
+    modelTables: {},
   }
   if (!doc) return empty
   const positions: Record<string, { x: number; y: number }> = {}
   const collapsed: Record<string, boolean> = {}
+  const modelTables: Record<string, ModelTableState> = {}
   for (const t of doc.tables) {
     positions[t.name.toLowerCase()] = { x: t.x, y: t.y }
     if (t.collapsed) collapsed[t.name.toLowerCase()] = true
+    if (t.status === 'deleted') {
+      // tombstone 保留 schema：先编辑后删的表恢复时找回编辑内容
+      modelTables[t.name.toLowerCase()] = { schema: t.schema ?? null, deleted: true }
+    } else if (t.schema) {
+      modelTables[t.name.toLowerCase()] = { schema: t.schema, deleted: false }
+    }
   }
   const inferredStatus: Record<string, 'confirmed' | 'ignored'> = {}
   const manualEdges: ErEdgeInfo[] = []
@@ -167,7 +245,7 @@ export function docOverlay(doc: ErModelDoc | null): ErDocOverlay {
     const target = toAnchorOverride(e.targetAnchor)
     if (source || target) edgeAnchors[e.id] = { ...(source ? { source } : {}), ...(target ? { target } : {}) }
   }
-  return { positions, collapsed, inferredStatus, manualEdges, edgeRoutes, edgeAnchors }
+  return { positions, collapsed, inferredStatus, manualEdges, edgeRoutes, edgeAnchors, modelTables }
 }
 
 export interface ModelDocInput {
@@ -184,17 +262,27 @@ export interface ModelDocInput {
   edgeRoutes: Record<string, { x: number; y: number }[]>
   /** edgeId → 手拖端点锚点（写入各边的 sourceAnchor/targetAnchor） */
   edgeAnchors: Record<string, { source?: AnchorOverride; target?: AnchorOverride }>
+  /** 模型外键边（显示层条目随文档保存；真源在各表 schema.foreignKeys） */
+  mfkEdges: ErEdgeInfo[]
+  /** 图上建模状态（小写表名 → schema/tombstone） */
+  modelTables: Record<string, ModelTableState>
 }
 
 /** 当前状态 → 模型文档（每次保存全量重建，文档即协作分享的载体） */
 export function buildModelDoc(input: ModelDocInput): ErModelDoc {
-  const tables = Object.entries(input.positions).map(([lower, p]) => ({
-    id: lower,
-    name: lower,
-    x: Math.round(p.x),
-    y: Math.round(p.y),
-    collapsed: !!input.collapsed[lower],
-  }))
+  const tables = Object.entries(input.positions).map(([lower, p]) => {
+    const m = input.modelTables[lower]
+    return {
+      id: lower,
+      name: lower,
+      x: Math.round(p.x),
+      y: Math.round(p.y),
+      collapsed: !!input.collapsed[lower],
+      // tombstone 保留 schema（恢复时找回编辑内容）；status 与 schema 独立
+      ...(m?.deleted ? { status: 'deleted' as const } : {}),
+      ...(m?.schema ? { schema: m.schema } : {}),
+    }
+  })
   const anchorFields = (id: string) => {
     const a = input.edgeAnchors[id]
     return {
@@ -204,10 +292,10 @@ export function buildModelDoc(input: ModelDocInput): ErModelDoc {
   }
   const toDocEdge = (
     e: ErEdgeInfo,
-    kind: 'fk' | 'manual',
+    kind: 'fk' | 'manual' | 'mfk',
   ): {
     id: string
-    kind: 'fk' | 'manual'
+    kind: 'fk' | 'manual' | 'mfk'
     via?: { x: number; y: number }[]
     sourceAnchor?: AnchorOverride
     targetAnchor?: AnchorOverride
@@ -223,6 +311,7 @@ export function buildModelDoc(input: ModelDocInput): ErModelDoc {
   })
   const fkEdges = input.fkEdges.map((e) => toDocEdge(e, 'fk'))
   const manualEdges = input.manualEdges.map((e) => toDocEdge(e, 'manual'))
+  const mfkEdges = input.mfkEdges.map((e) => toDocEdge(e, 'mfk'))
   const inferred = input.inferredEdges.map((e) => {
     const status = input.inferredStatus[e.id]
     return {
@@ -236,12 +325,12 @@ export function buildModelDoc(input: ModelDocInput): ErModelDoc {
     }
   })
   return {
-    formatVersion: 1,
+    formatVersion: 2,
     kind: input.kind,
     database: input.database,
     origin: { connectionName: input.connectionName, capturedAt: new Date().toISOString() },
     tables,
-    edges: [...fkEdges, ...manualEdges, ...inferred],
+    edges: [...fkEdges, ...manualEdges, ...mfkEdges, ...inferred],
   }
 }
 
