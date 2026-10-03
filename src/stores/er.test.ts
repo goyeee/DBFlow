@@ -579,7 +579,7 @@ describe('ER store：图上建模', () => {
     expect(t.modelTables.orders?.schema?.foreignKeys).toHaveLength(1)
     expect(t.modelTables.orders?.schema?.foreignKeys[0].onDelete).toBe('CASCADE')
     expect(t.graph!.mfkEdges).toHaveLength(1)
-    expect(t.graph.mfkEdges[0].id).toBe('mfk:orders:fk_orders_usersid')
+    expect(t.graph!.mfkEdges[0].id).toBe('mfk:orders:fk_orders_usersid')
     // 重复外键名拒绝
     const r2 = useErStore.getState().addModelFk(KEY_A, { table: 'orders', columns: ['usersID'], refTable: 'users', refColumns: ['usersID'] })
     expect(r2.ok).toBe(false)
