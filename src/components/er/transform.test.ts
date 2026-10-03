@@ -464,3 +464,101 @@ describe('placeFreshTables：库里新增表的堆叠摆放', () => {
     expect(placeFreshTables([], { minX: 0, minY: 0 })).toEqual({})
   })
 })
+
+// ───────────────── 图上建模：buildErGraph 融合模型表（二期 A） ─────────────────
+
+import type { ErTableSchema } from '../../api/types'
+import type { ModelTableState } from './modelSchema'
+
+describe('buildErGraph 模型表融合', () => {
+  const modelSnap: ErSnapshot = {
+    tables: [
+      {
+        name: 'orders', engine: null, collation: null, comment: null,
+        columns: [
+          { name: 'id', dataType: 'bigint', nullable: false, default: null, extra: '', comment: null, ordinal: 1, characterSet: null, collation: null },
+          { name: 'uid', dataType: 'bigint', nullable: true, default: null, extra: '', comment: null, ordinal: 2, characterSet: null, collation: null },
+        ],
+        indexes: [{ name: 'PRIMARY', columns: ['id'], subParts: [null], directions: [null], unique: true, isPrimary: true, indexType: 'BTREE' }],
+      },
+      {
+        name: 'users', engine: null, collation: null, comment: null,
+        columns: [{ name: 'id', dataType: 'bigint', nullable: false, default: null, extra: '', comment: null, ordinal: 1, characterSet: null, collation: null }],
+        indexes: [{ name: 'PRIMARY', columns: ['id'], subParts: [null], directions: [null], unique: true, isPrimary: true, indexType: 'BTREE' }],
+      },
+    ],
+    foreignKeys: [
+      { name: 'fk_ou', table: 'orders', columns: ['uid'], refTable: 'users', refColumns: ['id'], onDelete: null, onUpdate: null },
+    ],
+    serverVersion: '8.0.36',
+  }
+
+  const ordersSchema = (fks: ErTableSchema['foreignKeys'], comment: string | null = null): ErTableSchema => ({
+    name: 'orders', engine: null, collation: null, comment,
+    columns: [
+      { name: 'id', dataType: 'bigint', nullable: false, default: null, extra: '', comment: null, characterSet: null, collation: null },
+      { name: 'uid', dataType: 'bigint', nullable: true, default: null, extra: '', comment: null, characterSet: null, collation: null },
+    ],
+    indexes: [{ name: 'PRIMARY', columns: ['id'], subParts: [null], directions: [null], unique: true, isPrimary: true, indexType: 'BTREE' }],
+    foreignKeys: fks,
+  })
+
+  it('无 modelTables 时行为不变（纯浏览态）', () => {
+    const g = buildErGraph(modelSnap)
+    expect(Object.keys(g.tables)).toHaveLength(2)
+    expect(g.fkEdges).toHaveLength(1)
+    expect(g.mfkEdges).toEqual([])
+    expect(g.tables.orders.modelStatus).toBeUndefined()
+  })
+
+  it('编辑表以文档 schema 渲染并标 edited；tombstone 标 deleted', () => {
+    const modelTables: Record<string, ModelTableState> = {
+      orders: { schema: ordersSchema([], '改过'), deleted: false },
+      users: { schema: null, deleted: true },
+    }
+    const g = buildErGraph(modelSnap, modelTables)
+    expect(g.tables.orders.modelStatus).toBe('edited')
+    expect(g.tables.orders.comment).toBe('改过')
+    expect(g.tables.users.modelStatus).toBe('deleted')
+    expect(g.tables.users.columns).toHaveLength(1) // 结构仍来自快照
+  })
+
+  it('模型表删掉的库 FK 不再出边；保留的 FK 仍是 fk 边；新增模型 FK 出 mfk 边', () => {
+    // orders 被 copy-on-edit 且 schema.foreignKeys 为空 → 库里的 fk_ou 应消失（待应用 DROP）
+    const dropped = buildErGraph(modelSnap, { orders: { schema: ordersSchema([]), deleted: false } })
+    expect(dropped.fkEdges).toHaveLength(0)
+    expect(dropped.mfkEdges).toHaveLength(0)
+
+    // schema 保留同名 FK → 仍是 fk 边（真实存在于库）
+    const kept = buildErGraph(modelSnap, {
+      orders: { schema: ordersSchema([{ name: 'fk_ou', table: 'orders', columns: ['uid'], refTable: 'users', refColumns: ['id'], onDelete: null, onUpdate: null }]), deleted: false },
+    })
+    expect(kept.fkEdges).toHaveLength(1)
+    expect(kept.mfkEdges).toHaveLength(0)
+
+    // 模型新 FK（库没有）→ mfk 边，id 为 mfk:{表}:{约束名}
+    const added = buildErGraph(modelSnap, {
+      orders: { schema: ordersSchema([{ name: 'fk_new', table: 'orders', columns: ['uid'], refTable: 'users', refColumns: ['id'], onDelete: 'CASCADE', onUpdate: null }]), deleted: false },
+    })
+    expect(added.mfkEdges).toHaveLength(1)
+    expect(added.mfkEdges[0]).toMatchObject({ id: 'mfk:orders:fk_new', kind: 'mfk', onDelete: 'CASCADE' })
+  })
+
+  it('新建表（库没有）来自 schema 并标 new', () => {
+    const g = buildErGraph(modelSnap, {
+      brand_new: { schema: {
+        name: 'brand_new', engine: 'InnoDB', collation: null, comment: null,
+        columns: [{ name: 'id', dataType: 'int', nullable: false, default: null, extra: '', comment: null, characterSet: null, collation: null }],
+        indexes: [{ name: 'PRIMARY', columns: ['id'], subParts: [null], directions: [null], unique: true, isPrimary: true, indexType: 'BTREE' }],
+        foreignKeys: [],
+      }, deleted: false },
+    })
+    expect(g.tables.brand_new.modelStatus).toBe('new')
+    expect(g.tables.brand_new.singlePrimaryKey).toBe('id')
+  })
+
+  it('tombstone 且库里已不存在的条目被丢弃', () => {
+    const g = buildErGraph(modelSnap, { ghost: { schema: null, deleted: true } })
+    expect(g.tables.ghost).toBeUndefined()
+  })
+})
