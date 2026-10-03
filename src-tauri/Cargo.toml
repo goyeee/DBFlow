@@ -1,6 +1,6 @@
 [package]
 name = "dbflow"
-version = "0.3.0"
+version = "0.3.1"
 description = "DBFlow - 数据库结构与数据同步工具"
 authors = ["goyeee"]
 edition = "2021"
