@@ -417,7 +417,7 @@ describe('ER store：编辑与保存', () => {
     expect(t.dirty).toBe(false)
     expect(api.saveErModel).toHaveBeenCalledTimes(1)
     const doc = (api.saveErModel as ReturnType<typeof vi.fn>).mock.calls[0][2] as ErModelDoc
-    expect(doc.formatVersion).toBe(1)
+    expect(doc.formatVersion).toBe(2)
     expect(doc.origin.connectionName).toBe('本地')
     expect(doc.tables.find((x) => x.name === 'users')).toMatchObject({ x: 5, y: 6 })
     expect(doc.edges.find((e) => e.id === INF_ID)?.status).toBe('ignored')

@@ -400,6 +400,8 @@ export const useErStore = create<ErStore>((set, get) => {
         inferredStatus: t.inferredStatus,
         edgeRoutes: t.edgeRoutes,
         edgeAnchors: t.edgeAnchors,
+        mfkEdges: t.graph.mfkEdges,
+        modelTables: {},
       })
       await api.saveErModel(t.connectionId, t.database, doc)
       // 保存期间若发生了新的 load（seq 已变），不清新分片的 dirty

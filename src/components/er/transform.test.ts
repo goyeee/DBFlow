@@ -328,8 +328,10 @@ describe('buildModelDoc：当前状态 → 文档', () => {
         'fk:user_roles:fk_user_role_user': [{ x: 10, y: 10 }],
       },
       edgeAnchors: {},
+      mfkEdges: [],
+      modelTables: {},
     })
-    expect(doc.formatVersion).toBe(1)
+    expect(doc.formatVersion).toBe(2)
     expect(doc.database).toBe('db')
     expect(doc.origin.connectionName).toBe('本地')
     expect(doc.origin.capturedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
@@ -373,6 +375,8 @@ describe('buildModelDoc：当前状态 → 文档', () => {
       edgeAnchors: {
         [fkEdge.id]: { source: { side: 'top', pos: 0.25 }, target: { side: 'left', pos: 0.6 } },
       },
+      mfkEdges: [],
+      modelTables: {},
     })
     const fk = doc.edges.find((e) => e.id === fkEdge.id)
     expect(fk?.sourceAnchor).toEqual({ side: 'top', pos: 0.25 })
@@ -560,5 +564,90 @@ describe('buildErGraph 模型表融合', () => {
   it('tombstone 且库里已不存在的条目被丢弃', () => {
     const g = buildErGraph(modelSnap, { ghost: { schema: null, deleted: true } })
     expect(g.tables.ghost).toBeUndefined()
+  })
+})
+
+// ───────────────── 模型文档 v2 读写（二期 A） ─────────────────
+
+describe('模型文档 v2 读写', () => {
+  const mfkTestSchema: ErTableSchema = {
+    name: 'brand_new', engine: 'InnoDB', collation: null, comment: null,
+    columns: [{ name: 'id', dataType: 'int', nullable: false, default: null, extra: '', comment: null, characterSet: null, collation: null }],
+    indexes: [{ name: 'PRIMARY', columns: ['id'], subParts: [null], directions: [null], unique: true, isPrimary: true, indexType: 'BTREE' }],
+    foreignKeys: [],
+  }
+
+  it('buildModelDoc 写 v2：schema/status 落 tables 条目；tombstone 保留编辑 schema', () => {
+    const doc = buildModelDoc({
+      kind: 'mysql', database: 'db1', connectionName: '本地',
+      positions: { brand_new: { x: 10, y: 20 }, legacy: { x: 0, y: 0 } },
+      collapsed: {},
+      fkEdges: [], inferredEdges: [], manualEdges: [], inferredStatus: {},
+      edgeRoutes: {}, edgeAnchors: {}, mfkEdges: [],
+      modelTables: {
+        brand_new: { schema: mfkTestSchema, deleted: false },
+        legacy: { schema: { ...mfkTestSchema, name: 'legacy' }, deleted: true },
+      },
+    })
+    expect(doc.formatVersion).toBe(2)
+    const bn = doc.tables.find((t) => t.name === 'brand_new')!
+    expect(bn.schema).toEqual(mfkTestSchema)
+    expect(bn.status).toBeUndefined()
+    const legacy = doc.tables.find((t) => t.name === 'legacy')!
+    expect(legacy.status).toBe('deleted')
+    expect(legacy.schema?.name).toBe('legacy') // 先编辑后删：恢复时找回编辑内容
+  })
+
+  it('docOverlay 读 v2：schema/status 恢复为 modelTables（tombstone 带 schema）', () => {
+    const doc: ErModelDoc = {
+      formatVersion: 2, kind: 'mysql', database: 'db1',
+      origin: { connectionName: '', capturedAt: '' },
+      tables: [
+        { id: 'brand_new', name: 'brand_new', x: 0, y: 0, collapsed: false, schema: mfkTestSchema },
+        { id: 'legacy', name: 'legacy', x: 0, y: 0, collapsed: false, status: 'deleted', schema: { ...mfkTestSchema, name: 'legacy' } },
+      ],
+      edges: [],
+    }
+    const o = docOverlay(doc)
+    expect(o.modelTables.brand_new).toEqual({ schema: mfkTestSchema, deleted: false })
+    expect(o.modelTables.legacy).toEqual({ schema: { ...mfkTestSchema, name: 'legacy' }, deleted: true })
+  })
+
+  it('v1 文档照常叠加（惰性迁移）：无 schema 字段 = 无 modelTables', () => {
+    const doc: ErModelDoc = {
+      formatVersion: 1, kind: 'mysql', database: 'db1',
+      origin: { connectionName: '', capturedAt: '' },
+      tables: [{ id: 'users', name: 'users', x: 0, y: 0, collapsed: false }],
+      edges: [],
+    }
+    const o = docOverlay(doc)
+    expect(o.modelTables).toEqual({})
+    expect(o.positions.users).toEqual({ x: 0, y: 0 })
+  })
+
+  it('mfk 边条目随文档保存与恢复 via', () => {
+    const ordersSchema: ErTableSchema = {
+      ...mfkTestSchema, name: 'orders',
+      foreignKeys: [{ name: 'fk_new', table: 'orders', columns: ['uid'], refTable: 'users', refColumns: ['id'], onDelete: null, onUpdate: null }],
+    }
+    const doc = buildModelDoc({
+      kind: 'mysql', database: 'db1', connectionName: '',
+      positions: { orders: { x: 0, y: 0 }, users: { x: 100, y: 0 } },
+      collapsed: {},
+      fkEdges: [], manualEdges: [], inferredEdges: [], inferredStatus: {},
+      edgeRoutes: { 'mfk:orders:fk_new': [{ x: 5, y: 5 }] },
+      edgeAnchors: {},
+      mfkEdges: [{
+        id: 'mfk:orders:fk_new', kind: 'mfk', fkName: 'fk_new',
+        sourceTable: 'orders', sourceColumns: ['uid'],
+        targetTable: 'users', targetColumns: ['id'],
+      }],
+      modelTables: { orders: { schema: ordersSchema, deleted: false } },
+    })
+    const mfkEdge = doc.edges.find((e) => e.kind === 'mfk')
+    expect(mfkEdge?.id).toBe('mfk:orders:fk_new')
+    expect(mfkEdge?.via).toEqual([{ x: 5, y: 5 }])
+    const o = docOverlay(doc)
+    expect(o.edgeRoutes['mfk:orders:fk_new']).toEqual([{ x: 5, y: 5 }])
   })
 })

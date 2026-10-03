@@ -176,6 +176,8 @@ export function ErToolbar() {
         inferredStatus: s.inferredStatus,
         edgeRoutes: s.edgeRoutes,
         edgeAnchors: s.edgeAnchors,
+        mfkEdges: s.graph.mfkEdges,
+        modelTables: {},
       })
       await api.exportErModel(path, doc)
       message.success('已导出模型文档')
