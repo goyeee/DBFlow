@@ -6,6 +6,7 @@ vi.mock('../api/commands', () => ({ api: {} }))
 
 import { api } from '../api/commands'
 import { useErStore } from './er'
+import { newTableSchema, snapshotTableToSchema } from '../components/er/modelSchema'
 
 const KEY_A = 'c1/db1/__er__'
 const KEY_B = 'c1/db2/__er__'
@@ -100,6 +101,9 @@ function mockApi(snapshot: ErSnapshot, doc: ErModelDoc | null) {
   ;(api as Record<string, unknown>).getErSnapshot = vi.fn().mockResolvedValue(snapshot)
   ;(api as Record<string, unknown>).loadErModel = vi.fn().mockResolvedValue(doc)
   ;(api as Record<string, unknown>).saveErModel = vi.fn().mockResolvedValue(undefined)
+  ;(api as Record<string, unknown>).erDiff = vi.fn().mockResolvedValue([])
+  ;(api as Record<string, unknown>).applySync = vi.fn().mockResolvedValue([])
+  ;(api as Record<string, unknown>).previewTableDdl = vi.fn().mockResolvedValue('')
 }
 
 const initialState = useErStore.getState()
@@ -459,5 +463,131 @@ describe('ER store：编辑与保存', () => {
     expect(t.docIssue).toContain('JSON')
     useErStore.getState().dismissDocIssue(KEY_A)
     expect(useErStore.getState().tabs[KEY_A].docIssue).toBeNull()
+  })
+})
+
+// ───────────────── 图上建模（二期 A） ─────────────────
+
+describe('ER store：图上建模', () => {
+  it('createTable 建新表（默认名避开既有表）并打开设计器、置脏', async () => {
+    mockApi(snapWith(true), null)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    const lower = useErStore.getState().createTable(KEY_A)
+    expect(lower).toBe('new_table_1')
+    const t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.new_table_1.schema?.columns[0].name).toBe('id')
+    expect(t.modelTables.new_table_1.deleted).toBe(false)
+    expect(t.dirty).toBe(true)
+    expect(t.designerTable).toBe('new_table_1')
+    expect(t.graph!.tables.new_table_1.modelStatus).toBe('new')
+    // graph 里出现新表节点（来自 schema）
+    expect(t.graph!.tables.new_table_1.columns).toHaveLength(1)
+    expect(t.snapshot).not.toBeNull()
+  })
+
+  it('saveTableSchema：copy-on-edit 同步表落 schema；与库一致时不落（无假角标）', async () => {
+    mockApi(snapWith(true), null)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    const store = useErStore.getState()
+    // users 表原样保存 → 不产生 modelTables 条目
+    const src = store.tabs[KEY_A]!.snapshot!.tables.find((x) => x.name === 'users')!
+    const same = snapshotTableToSchema(src, [])
+    const r = store.saveTableSchema(KEY_A, 'users', same)
+    expect(r.ok).toBe(true)
+    expect(useErStore.getState().tabs[KEY_A]!.modelTables.users).toBeUndefined()
+    // 加一列再存 → 落 schema 且 graph 立即以模型为准
+    const changed = {
+      ...same,
+      columns: [...same.columns, { name: 'memo', dataType: 'varchar(50)', nullable: true, default: null, extra: '', comment: null, characterSet: null, collation: null }],
+    }
+    useErStore.getState().saveTableSchema(KEY_A, 'users', changed)
+    const t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.users?.schema).toEqual(changed)
+    expect(t.graph!.tables.users.modelStatus).toBe('edited')
+    expect(t.graph!.tables.users.columns.some((c) => c.name === 'memo')).toBe(true)
+  })
+
+  it('saveTableSchema 校验失败返回错误不落库；未应用新表改名 rekey', async () => {
+    mockApi(snapWith(true), null)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    const store = useErStore.getState()
+    store.createTable(KEY_A)
+    // 空列
+    let r = store.saveTableSchema(KEY_A, 'new_table_1', { ...newTableSchema('new_table_1'), columns: [] })
+    expect(r.ok).toBe(false)
+    // 与库表重名
+    r = useErStore.getState().saveTableSchema(KEY_A, 'new_table_1', newTableSchema('users'))
+    expect(r.ok).toBe(false)
+    // 已同步表不能改名
+    r = useErStore.getState().saveTableSchema(KEY_A, 'users', newTableSchema('renamed_users'))
+    expect(r.ok).toBe(false)
+    // 改名成功：条目/位置迁移到新键
+    r = useErStore.getState().saveTableSchema(KEY_A, 'new_table_1', newTableSchema('orders_v2'))
+    expect(r.ok).toBe(true)
+    const t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.new_table_1).toBeUndefined()
+    expect(t.modelTables.orders_v2?.schema?.name).toBe('orders_v2')
+    expect(t.positions.orders_v2).toBeDefined()
+    expect(t.positions.new_table_1).toBeUndefined()
+    expect(t.designerTable).toBe('orders_v2')
+  })
+
+  it('deleteTable/restoreTable：同步表转 tombstone（保留编辑），新建表直接移除；被引用阻止', async () => {
+    mockApi(snapWith(true), null)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    const store = useErStore.getState()
+    // 先给 user_roles 建一个引用 users 的模型 FK → 删 users 应被阻止
+    const r = store.addModelFk(KEY_A, { table: 'user_roles', columns: ['usersID'], refTable: 'users', refColumns: ['usersID'] })
+    expect(r.ok).toBe(true)
+    expect(store.deleteTable(KEY_A, 'users').ok).toBe(false) // 被阻止
+    let t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.users).toBeUndefined()
+    expect(t.graph!.tables.users.modelStatus).not.toBe('deleted')
+    // 删引用方 user_roles（已编辑）→ tombstone 且保留 schema
+    useErStore.getState().deleteTable(KEY_A, 'user_roles')
+    t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.user_roles?.deleted).toBe(true)
+    expect(t.modelTables.user_roles?.schema?.foreignKeys.length).toBeGreaterThan(0)
+    expect(t.graph!.tables.user_roles.modelStatus).toBe('deleted')
+    // 恢复：有编辑内容 → 恢复为已编辑态（编辑不丢）
+    useErStore.getState().restoreTable(KEY_A, 'user_roles')
+    t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.user_roles).toMatchObject({ deleted: false })
+    expect(t.modelTables.user_roles?.schema).toBeDefined()
+    expect(t.graph!.tables.user_roles.modelStatus).toBe('edited')
+    // 未编辑过的表：tombstone → 恢复 = 回到无痕
+    useErStore.getState().deleteTable(KEY_A, 'orders')
+    expect(useErStore.getState().tabs[KEY_A]!.modelTables.orders).toEqual({ schema: null, deleted: true })
+    useErStore.getState().restoreTable(KEY_A, 'orders')
+    expect(useErStore.getState().tabs[KEY_A]!.modelTables.orders).toBeUndefined()
+    // 新建表删除 → 直接消失
+    useErStore.getState().createTable(KEY_A)
+    useErStore.getState().deleteTable(KEY_A, 'new_table_1')
+    t = useErStore.getState().tabs[KEY_A]!
+    expect(t.modelTables.new_table_1).toBeUndefined()
+    expect(t.graph!.tables.new_table_1).toBeUndefined()
+  })
+
+  it('addModelFk：子表 copy-on-edit（含库外键）+ mfk 边出现；removeModelFk 移除', async () => {
+    mockApi(snapWith(true), null)
+    await useErStore.getState().load(KEY_A, 'c1', 'db1', '本地')
+    const store = useErStore.getState()
+    const r = store.addModelFk(KEY_A, { table: 'orders', columns: ['usersID'], refTable: 'users', refColumns: ['usersID'], onDelete: 'CASCADE' })
+    expect(r.ok).toBe(true)
+    let t = useErStore.getState().tabs[KEY_A]!
+    // 子表 copy-on-edit：结构来自快照（含库里的 fk_ur_user 外键）+ 新 FK 追加
+    expect(t.modelTables.orders?.schema?.foreignKeys).toHaveLength(1)
+    expect(t.modelTables.orders?.schema?.foreignKeys[0].onDelete).toBe('CASCADE')
+    expect(t.graph!.mfkEdges).toHaveLength(1)
+    expect(t.graph.mfkEdges[0].id).toBe('mfk:orders:fk_orders_usersid')
+    // 重复外键名拒绝
+    const r2 = useErStore.getState().addModelFk(KEY_A, { table: 'orders', columns: ['usersID'], refTable: 'users', refColumns: ['usersID'] })
+    expect(r2.ok).toBe(false)
+    // 删除
+    useErStore.getState().removeModelFk(KEY_A, 'orders', 'fk_orders_usersid')
+    t = useErStore.getState().tabs[KEY_A]!
+    expect(t.graph!.mfkEdges).toHaveLength(0)
+    // 删完与库一致 → 条目整体清除（无假角标）
+    expect(t.modelTables.orders).toBeUndefined()
   })
 })
