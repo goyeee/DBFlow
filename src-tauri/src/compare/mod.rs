@@ -1,5 +1,6 @@
 //! 结构对比引擎：双端快照 → 差异项列表（纯函数，可单测；一源多目标时可直接复用）。
 pub mod sqlgen;
+pub mod er_model;
 
 use std::collections::BTreeMap;
 

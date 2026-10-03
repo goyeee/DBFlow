@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -156,7 +156,7 @@ pub struct SchemaSnapshot {
     pub server_version: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableDef {
     pub name: String,
@@ -168,7 +168,7 @@ pub struct TableDef {
     pub indexes: Vec<IndexDef>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnDef {
     pub name: String,
@@ -180,6 +180,8 @@ pub struct ColumnDef {
     /// 归一化 EXTRA：auto_increment、on update current_timestamp 等
     pub extra: String,
     pub comment: Option<String>,
+    /// 前端模型 schema 不带 ordinal，反序列化缺省为 0
+    #[serde(default)]
     pub ordinal: u32,
     /// 列级字符集（CHARACTER_SET_NAME）
     pub character_set: Option<String>,
@@ -187,7 +189,7 @@ pub struct ColumnDef {
     pub collation: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexDef {
     pub name: String,
@@ -211,7 +213,7 @@ pub struct ViewDef {
 }
 
 /// 外键定义（ER 图关系线用）。复合外键的 columns / ref_columns 按序号一一对应。
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ForeignKeyDef {
     pub name: String,
