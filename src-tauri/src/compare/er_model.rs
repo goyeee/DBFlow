@@ -10,7 +10,7 @@ use crate::datasource::{ForeignKeyDef, TableDef};
 use crate::compare::sqlgen::{
     add_foreign_key_clause, drop_foreign_key_ddl, foreign_key_ddl, qualified, quote_ident,
 };
-use crate::compare::{DiffAction, DiffItem, DiffKind};
+use crate::compare::{diff_snapshots, CompareOptions, DiffAction, DiffItem, DiffKind};
 use crate::datasource::SchemaSnapshot;
 use crate::error::{AppError, AppResult};
 
@@ -234,6 +234,22 @@ pub fn diff_foreign_keys(
 
     for fk in db_fks {
         let key = (fk.table.to_lowercase(), fk.name.to_lowercase());
+        // 引用 tombstone 表的库外键一律 DROP（spec：删除动作优先——即使模型
+        // 仍保留同名 FK 也要先解除引用，否则 DROP TABLE 必失败）
+        if tombstones.contains(&fk.ref_table.to_lowercase()) {
+            handled.insert(key);
+            items.push(fk_item(
+                DiffAction::Drop,
+                fk,
+                drop_foreign_key_ddl(db, &fk.table, &fk.name),
+                true,
+                None,
+                Some(foreign_key_ddl(db, fk)),
+                None,
+                Some(describe_fk(fk)),
+            ));
+            continue;
+        }
         match model_idx.get(&key) {
             Some(m) => {
                 handled.insert(key);
@@ -290,6 +306,107 @@ pub fn diff_foreign_keys(
         ));
     }
     items
+}
+
+/// 模型 vs 库实时结构 → 按依赖排序的差异清单（应用回库的完整 DDL 序列）。
+/// 排序：① DROP FK（断环/解除引用）→ ② DROP TABLE → ③ 建表/改表（列子句同表
+/// 连续，前端可合并为一条 ALTER）→ ④ ADD/重建 FK。排序只按（组, 表名）做
+/// 稳定排序：组 ③ 依赖 diff_snapshots 的表内列序（AFTER 链），不能按 id 重排；
+/// 稳定排序同时保证同表项相邻。
+pub fn diff_model_vs_db(
+    db: &str,
+    model: &[ErModelTableInput],
+    live: &SchemaSnapshot,
+    live_fks: &[ForeignKeyDef],
+) -> AppResult<Vec<DiffItem>> {
+    validate_model_payload(model)?;
+    let m = build_model_snapshot(db, model, live);
+    let model_tables: HashSet<String> =
+        m.snapshot.tables.iter().map(|t| t.name.to_lowercase()).collect();
+
+    // 目标快照：实时快照过滤到涉及表（库里其他表永不参与）
+    let target = SchemaSnapshot {
+        database: db.to_string(),
+        tables: live
+            .tables
+            .iter()
+            .filter(|t| m.involved.contains(&t.name.to_lowercase()))
+            .cloned()
+            .collect(),
+        views: Vec::new(),
+        server_version: live.server_version.clone(),
+    };
+
+    let opts = CompareOptions { compare_indexes: true, compare_views: false };
+    let mut items: Vec<DiffItem> = diff_snapshots(&m.snapshot, &target, &opts)
+        .into_iter()
+        .filter(|i| i.action != DiffAction::Noop)
+        .flat_map(|i| {
+            // ER 不做重命名推断：rename 项拆回 DROP(旧) + CREATE(新)，与模型表达一致。
+            // 两端同库，source_ddl 就是可直接执行的 CREATE 语句
+            if i.action == DiffAction::Rename {
+                vec![
+                    DiffItem {
+                        id: format!("tbl:{}", i.table),
+                        kind: DiffKind::Table,
+                        action: DiffAction::Drop,
+                        table: i.table.clone(),
+                        name: i.table.clone(),
+                        source_desc: None,
+                        target_desc: i.target_desc.clone(),
+                        sql: Some(format!(
+                            "DROP TABLE {}",
+                            qualified(db, &i.table)
+                        )),
+                        sql_clause: None,
+                        dangerous: true,
+                        source_ddl: None,
+                        target_ddl: i.target_ddl.clone(),
+                        ref_table: None,
+                    },
+                    DiffItem {
+                        id: format!("tbl:{}", i.name),
+                        kind: DiffKind::Table,
+                        action: DiffAction::Create,
+                        table: i.name.clone(),
+                        name: i.name.clone(),
+                        source_desc: i.source_desc.clone(),
+                        target_desc: None,
+                        sql: i.source_ddl.clone(),
+                        sql_clause: None,
+                        dangerous: false,
+                        source_ddl: i.source_ddl.clone(),
+                        target_ddl: None,
+                        ref_table: None,
+                    },
+                ]
+            } else {
+                vec![i]
+            }
+        })
+        .collect();
+
+    items.extend(diff_foreign_keys(
+        db,
+        &model_tables,
+        &m.model_fks,
+        live_fks,
+        &m.tombstones,
+    ));
+
+    // 分组排序：DROP FK(0) → DROP TABLE(1) → 结构项(2) → ADD/rebuild FK(3)
+    let group = |i: &DiffItem| match (i.kind, i.action) {
+        (DiffKind::ForeignKey, DiffAction::Drop) => 0,
+        (DiffKind::Table, DiffAction::Drop) => 1,
+        (DiffKind::ForeignKey, _) => 3,
+        _ => 2,
+    };
+    items.sort_by(|a, b| {
+        group(a)
+            .cmp(&group(b))
+            .then_with(|| a.table.to_lowercase().cmp(&b.table.to_lowercase()))
+    });
+    Ok(items)
 }
 
 #[cfg(test)]
@@ -514,6 +631,124 @@ mod tests {
         let fk = fkd("fk_uid", "orders", &["uid"], "users", &["id"]);
         let items = diff_foreign_keys("db", &model_tables, &[fk.clone()], &[fk], &HashSet::new());
         assert!(items.is_empty());
+    }
+
+    fn full_model_diff(db: &str, model: &[ErModelTableInput], l: &SchemaSnapshot, fks: &[ForeignKeyDef]) -> Vec<crate::compare::DiffItem> {
+        diff_model_vs_db(db, model, l, fks).unwrap()
+    }
+
+    fn snap_of(db: &str, tables: Vec<TableDef>) -> SchemaSnapshot {
+        SchemaSnapshot { database: db.into(), tables, views: vec![], server_version: Some("8.0.36".into()) }
+    }
+
+    #[test]
+    fn assemble_end_to_end_new_edit_tombstone() {
+        // 库：keep(id,name) + legacy(id)；模型：编辑 keep(加列) + 新建 fresh + tombstone legacy
+        let l = snap_of("db", vec![
+            tbl("keep", &[("id", "int"), ("name", "varchar(20)")]),
+            tbl("legacy", &[("id", "int")]),
+        ]);
+        let model = vec![
+            input("keep", &[("id", "int"), ("name", "varchar(20)"), ("memo", "text")], &[]),
+            input("fresh", &[("id", "int")], &[]),
+            { let mut t = input("legacy", &[], &[]); t.schema = None; t },
+        ];
+        let items = full_model_diff("db", &model, &l, &[]);
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert!(ids.contains(&"col:keep:memo"), "{ids:?}");
+        assert!(ids.contains(&"tbl:fresh"), "{ids:?}");
+        assert!(ids.contains(&"tbl:legacy"), "{ids:?}");
+        let legacy = items.iter().find(|i| i.id == "tbl:legacy").unwrap();
+        assert!(legacy.dangerous);
+    }
+
+    #[test]
+    fn rename_heuristic_split_into_drop_and_create() {
+        // 结构相同、名字像 rename（tbl_old → tbl_new）：ER 语义必须是 DROP+CREATE，
+        // 不是 RENAME（模型不支持改名，删旧建新就是两个独立操作）
+        let same_cols = [("id", "int")];
+        let l = snap_of("db", vec![tbl("tbl_old", &same_cols)]);
+        let model = vec![
+            { let mut t = input("tbl_old", &[], &[]); t.schema = None; t },
+            input("tbl_new", &same_cols, &[]),
+        ];
+        let items = full_model_diff("db", &model, &l, &[]);
+        assert!(items.iter().all(|i| i.action != crate::compare::DiffAction::Rename), "{items:?}");
+        assert!(items.iter().any(|i| i.id == "tbl:tbl_new" && i.action == crate::compare::DiffAction::Create));
+        let drop = items.iter().find(|i| i.id == "tbl:tbl_old").unwrap();
+        assert_eq!(drop.action, crate::compare::DiffAction::Drop);
+        assert_eq!(drop.sql.as_deref(), Some("DROP TABLE `db`.`tbl_old`"));
+    }
+
+    #[test]
+    fn ddl_order_drop_fk_first_add_fk_last() {
+        // tombstone b 被库 FK（在保留表 c 上）引用 → 先 DROP FK；新表 + 新 FK 最后
+        let l = snap_of("db", vec![tbl("b", &[("id", "int")]), tbl("c", &[("bid", "int")])]);
+        let fks = vec![fkd("fk_cb", "c", &["bid"], "b", &["id"])];
+        let model = vec![
+            { let mut t = input("b", &[], &[]); t.schema = None; t },
+            input("c", &[("bid", "int")], &[("fk_cb", &["bid"], &["id"])]),
+        ];
+        let items = full_model_diff("db", &model, &l, &fks);
+        // 库 FK 与模型 FK 定义一致 → 只有 DROP TABLE b 与引用清理
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["fk:c:fk_cb", "tbl:b"], "{ids:?}");
+        let drop_fk = &items[0];
+        assert_eq!(drop_fk.sql.as_deref(), Some("ALTER TABLE `db`.`c` DROP FOREIGN KEY `fk_cb`"));
+    }
+
+    #[test]
+    fn ddl_order_keeps_same_table_column_items_adjacent() {
+        // 同表多个列变更 + FK 项并存：同表列项必须连续（前端 buildDeployStatements
+        // 只合并连续同表子句；被 FK 项插断会产生多条 ALTER）
+        let l = snap_of("db", vec![tbl("t", &[("id", "int")])]);
+        let model = vec![input("t", &[("id", "int"), ("a", "int"), ("b", "int")], &[])];
+        let items = full_model_diff("db", &model, &l, &[]);
+        let seq: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(seq, vec!["col:t:a", "col:t:b"], "{seq:?}");
+        // 加上 FK 后：FK 项必须排在列项之后（组序 ④），不打断连续性
+        let fks = vec![fkd("fk_self", "t", &["a"], "u", &["id"])];
+        let model2 = vec![input("t", &[("id", "int"), ("a", "int"), ("b", "int")], &[("fk_self", &["a"], &["id"])])];
+        let items2 = full_model_diff("db", &model2, &l, &fks);
+        let seq2: Vec<&str> = items2.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(seq2, vec!["col:t:a", "col:t:b", "fk:t:fk_self"], "{seq2:?}");
+    }
+
+    #[test]
+    fn noop_items_filtered_out() {
+        // 库与模型一致的表不出现在结果里（ER 应用只关心要执行的差异）
+        let l = snap_of("db", vec![tbl("same", &[("id", "int")])]);
+        let model = vec![input("same", &[("id", "int")], &[])];
+        let items = full_model_diff("db", &model, &l, &[]);
+        assert!(items.is_empty(), "{items:?}");
+    }
+
+    #[test]
+    fn circular_tombstone_fks_all_dropped_before_tables() {
+        // a ↔ b 环形互引且都被删除：两条 DROP FK 都在两条 DROP TABLE 之前
+        let l = snap_of("db", vec![tbl("a", &[("id", "int"), ("bid", "int")]), tbl("b", &[("id", "int"), ("aid", "int")])]);
+        let fks = vec![
+            fkd("fk_ab", "a", &["bid"], "b", &["id"]),
+            fkd("fk_ba", "b", &["aid"], "a", &["id"]),
+        ];
+        let model = vec![
+            { let mut t = input("a", &[], &[]); t.schema = None; t },
+            { let mut t = input("b", &[], &[]); t.schema = None; t },
+        ];
+        let items = full_model_diff("db", &model, &l, &fks);
+        let kinds: Vec<&str> = items
+            .iter()
+            .map(|i| if i.kind == DiffKind::ForeignKey { "fk" } else if i.kind == crate::compare::DiffKind::Table { "tbl" } else { "other" })
+            .collect();
+        assert_eq!(kinds, vec!["fk", "fk", "tbl", "tbl"], "{items:?}");
+        assert!(items.iter().take(2).all(|i| i.action == DiffAction::Drop));
+        assert!(items.iter().skip(2).all(|i| i.action == crate::compare::DiffAction::Drop && i.kind == crate::compare::DiffKind::Table));
+    }
+
+    #[test]
+    fn validation_error_propagates() {
+        let l = snap_of("db", vec![]);
+        assert!(diff_model_vs_db("db", &[input("", &[], &[])], &l, &[]).is_err());
     }
 
     fn live(db: &str, names: &[&str]) -> SchemaSnapshot {
